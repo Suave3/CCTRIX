@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Railpack start script — enters the project subdirectory, installs deps, and runs gunicorn
-cd "$(dirname "$0")/cctrix-main" || exit 1
+# Railpack start script — installs deps and runs gunicorn from repo root
+cd "$(dirname "$0")" || exit 1
 
 echo "Starting build and run from: $(pwd)"
 
