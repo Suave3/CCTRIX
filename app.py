@@ -215,12 +215,14 @@ def is_ip_blocked(ip):
 # RECAPTCHA VERIFIER
 # =========================
 def _verify_recaptcha(token, ip):
-    # Skip verification when using Google's official test keys (local dev).
-    # In production, set real RECAPTCHA_SECRET_KEY in .env.
-    if RECAPTCHA_SECRET_KEY == "6LeIxAcTAAAAAGG-vFI1TnRWxMZNFuojJ17ZFtSe":
-        return True  # test key — always pass
+    # Even in test/local mode, require a token to be present.
+    # In production, real RECAPTCHA_SECRET_KEY in .env will perform actual verification.
     if not token:
         return False
+    
+    # If using Google's official test keys, allow any non-empty token (local dev only).
+    if RECAPTCHA_SECRET_KEY == "6LeIxAcTAAAAAGG-vFI1TnRWxMZNFuojJ17ZFtSe":
+        return True  # test key — accept any token
     try:
         data = urllib.parse.urlencode({
             "secret": RECAPTCHA_SECRET_KEY,

@@ -112,6 +112,66 @@
     }
   }
 
+  /* ── 5. reCAPTCHA form validation ── */
+  function initRecaptchaValidation() {
+    var form = document.getElementById('login-form');
+    var submitBtn = document.getElementById('submit-btn');
+    if (!form || !submitBtn) return;
+    
+    // Disable submit button by default until reCAPTCHA is checked
+    submitBtn.disabled = true;
+    submitBtn.title = 'Complete reCAPTCHA to enable';
+    
+    // Enable button when reCAPTCHA callback fires
+    window.onRecaptchaSuccess = function() {
+      submitBtn.disabled = false;
+      submitBtn.title = '';
+    };
+    
+    // Also listen for reCAPTCHA iframe load (backup trigger)
+    var observeReCaptcha = function() {
+      var iframe = document.querySelector('[title="reCAPTCHA"]');
+      if (iframe) {
+        iframe.addEventListener('load', function() {
+          // Verify token exists after iframe loads
+          var checkToken = setInterval(function() {
+            var response = document.querySelector('[name="g-recaptcha-response"]');
+            if (response && response.value) {
+              submitBtn.disabled = false;
+              submitBtn.title = '';
+              clearInterval(checkToken);
+            }
+          }, 200);
+          setTimeout(function() { clearInterval(checkToken); }, 5000);
+        });
+      }
+    };
+    
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', observeReCaptcha);
+    } else {
+      observeReCaptcha();
+    }
+    
+    // Validate reCAPTCHA on form submit
+    form.addEventListener('submit', function(e) {
+      var recaptchaResponse = document.querySelector('[name="g-recaptcha-response"]');
+      if (!recaptchaResponse || !recaptchaResponse.value) {
+        e.preventDefault();
+        e.stopPropagation();
+        alert('Please complete the reCAPTCHA verification.');
+        return false;
+      }
+    });
+  }
+  
+  // Initialize reCAPTCHA validation when DOM is ready
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', initRecaptchaValidation);
+  } else {
+    initRecaptchaValidation();
+  }
+
   /* Start checks after DOM ready */
   function start() {
     setInterval(checkDevTools, 800);
