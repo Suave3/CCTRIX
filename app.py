@@ -11,6 +11,7 @@ from datetime import datetime, date, timedelta
 import psycopg2
 from dotenv import load_dotenv
 from PIL import Image
+import database as db
 
 # Optional imports for GUI/camera functionality (may not be available in cloud)
 try:
@@ -48,138 +49,16 @@ RECAPTCHA_SITE_KEY   = os.environ.get("RECAPTCHA_SITE_KEY",   "6LdL4AgtAAAAACyhJ
 RECAPTCHA_SECRET_KEY = os.environ.get("RECAPTCHA_SECRET_KEY", "6LdL4AgtAAAAAJmX-CHFzJQBtG4-V7DAvK17yUMM")
 
 # =========================
-# DATABASE CONNECTION
+# DATABASE CONNECTION & INITIALIZATION
 # =========================
-
-def get_db_config():
-    return {
-        "host": os.environ.get("DB_HOST", "turntable.proxy.rlwy.net"),
-        "port": os.environ.get("DB_PORT", "43684"),
-        "user": os.environ.get("DB_USER", "postgres"),
-        "password": os.environ.get("DB_PASSWORD", ""),
-        "database": os.environ.get("DB_NAME", "railway"),
-        "connect_timeout": int(os.environ.get("DB_CONNECT_TIMEOUT", "5")),
-    }
-
-conn = None
-cursor = None
-
-def connect_db():
-    global conn, cursor
-    try:
-        conn = psycopg2.connect(**get_db_config())
-        conn.autocommit = False
-        cursor = conn.cursor()
-        print("Database Connected!")
-    except Exception as e:
-        print("DATABASE ERROR:", e)
-        conn = None
-        cursor = None
-
-connect_db()
-
-DEFAULT_USER_HASHES = {
-    "admin": generate_password_hash("admin123"),
-    "viewer": generate_password_hash("viewer123"),
-}
-DEFAULT_USER_ROLES = {
-    "admin": "admin",
-    "viewer": "viewer",
-}
-
-def _ensure_conn():
-    global conn, cursor
-    if conn is None or getattr(conn, "closed", 1) != 0:
-        connect_db()
-        return
-    try:
-        cursor.execute("SELECT 1")
-    except Exception:
-        try:
-            conn.close()
-        except Exception:
-            pass
-        connect_db()
-
-# =========================
-# INIT DATABASE
-# =========================
-def init_db():
-    if not cursor:
-        _ensure_conn()
-    if not cursor:
-        return
-    try:
-        cursor.execute("""
-        CREATE TABLE IF NOT EXISTS users (
-            id SERIAL PRIMARY KEY,
-            username TEXT UNIQUE NOT NULL,
-            password_hash TEXT NOT NULL,
-            role TEXT NOT NULL DEFAULT 'viewer',
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-        """)
-        cursor.execute("""
-        CREATE TABLE IF NOT EXISTS detection_logs (
-            id SERIAL PRIMARY KEY,
-            person_detected BOOLEAN,
-            confidence FLOAT,
-            image_path TEXT,
-            detected_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-        """)
-        cursor.execute("""
-        CREATE TABLE IF NOT EXISTS auth_logs (
-            id SERIAL PRIMARY KEY,
-            username TEXT,
-            action TEXT,
-            reason TEXT,
-            ip_address TEXT,
-            user_agent TEXT,
-            timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-        """)
-        cursor.execute("""
-        CREATE TABLE IF NOT EXISTS failed_login_attempts (
-            id SERIAL PRIMARY KEY,
-            username TEXT,
-            attempted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            ip_address TEXT,
-            user_agent TEXT
-        )
-        """)
-        conn.commit()
-        print("Tables Ready!")
-        _seed_users()
-    except Exception as e:
-        print("INIT DB ERROR:", e)
-
-
-def _seed_users():
-    try:
-        cursor.execute("SELECT COUNT(*) FROM users")
-        count = cursor.fetchone()[0]
-        if count == 0:
-            cursor.execute("""
-                INSERT INTO users (username, password_hash, role) VALUES
-                (%s, %s, %s), (%s, %s, %s)
-            """, (
-                'admin', generate_password_hash('admin123'), 'admin',
-                'viewer', generate_password_hash('viewer123'), 'viewer'
-            ))
-            conn.commit()
-            print("Default users seeded — admin:admin123, viewer:viewer123")
-    except Exception as e:
-        print("SEED ERROR:", e)
-
 
 # Initialize database on startup (but don't crash if it fails)
 try:
-    init_db()
-    print("✅ Database initialized on startup")
+    db.init_db()
+    print("✅ Database initialized successfully!")
 except Exception as e:
-    print(f"⚠️  Database init deferred: {e}")
-    print("   Database will be initialized on first request")
+    print(f"⚠️  Database init error: {e}")
+    print("   Database will be retried on first request")
 
 # =========================
 # FOLDERS
@@ -449,25 +328,21 @@ stable_motion_state = False
 # LOGIN CHECK
 # =========================
 def is_ip_blocked(ip):
-
+    """Check if an IP is blocked due to too many failed login attempts"""
     try:
-        _ensure_conn()
+        from datetime import datetime, timedelta
         time_limit = datetime.now() - timedelta(minutes=1)
-
-        if not cursor:
-            return False
-
-        cursor.execute("""
+        
+        # Count failed login attempts in the last minute
+        query = """
             SELECT COUNT(*)
             FROM failed_login_attempts
             WHERE ip_address = %s
             AND attempted_at >= %s
-        """, (ip, time_limit))
-
-        count = cursor.fetchone()[0]
-
+        """
+        result = db.execute_query(query, (ip, time_limit), fetch=True)
+        count = result[0][0] if result else 0
         return count >= 3
-
     except Exception as e:
         print("IP block check error:", e)
         return False
@@ -505,17 +380,8 @@ def _verify_recaptcha(token, ip):
 # AUTH LOGGER
 # =========================
 def _log_auth(username, action, reason, ip, user_agent):
-    _ensure_conn()
-    if not cursor:
-        return
-    try:
-        cursor.execute("""
-            INSERT INTO auth_logs (username, action, reason, ip_address, user_agent)
-            VALUES (%s, %s, %s, %s, %s)
-        """, (username, action, reason, ip, user_agent))
-        conn.commit()
-    except Exception as e:
-        print("AUTH LOG ERROR:", e)
+    """Log authentication events to database"""
+    db.log_auth(username, action, reason, ip, user_agent)
 
 # =========================
 # ROLE GUARD
@@ -554,18 +420,20 @@ def login():
         username = request.form.get('username')
         password = request.form.get('password')
 
-        _ensure_conn()
+        # Try to get user from database
         user = None
-        if cursor:
-            try:
-                cursor.execute(
-                    "SELECT id, password_hash, role FROM users WHERE username = %s",
-                    (username,)
-                )
-                user = cursor.fetchone()
-            except Exception as e:
-                print("DB ERROR:", e)
+        try:
+            result = db.execute_query(
+                "SELECT id, password_hash, role FROM users WHERE username = %s",
+                (username,),
+                fetch=True
+            )
+            if result:
+                user = result[0]
+        except Exception as e:
+            print("DB ERROR:", e)
 
+        # Check if password is correct
         if user and check_password_hash(user[1], password):
             session['logged_in'] = True
             session['username'] = username
@@ -573,25 +441,8 @@ def login():
             _log_auth(username, 'LOGIN_SUCCESS', 'Valid credentials', ip, user_agent)
             return redirect(url_for('index'))
 
-        if not cursor and username in DEFAULT_USER_HASHES and check_password_hash(DEFAULT_USER_HASHES[username], password):
-            session['logged_in'] = True
-            session['username'] = username
-            session['role'] = DEFAULT_USER_ROLES[username]
-            _log_auth(username, 'LOGIN_SUCCESS', 'Fallback default credentials', ip, user_agent)
-            return redirect(url_for('index'))
-
-        # Failed login
-        _ensure_conn()
-        if cursor:
-            try:
-                cursor.execute("""
-                    INSERT INTO failed_login_attempts (username, ip_address, user_agent)
-                    VALUES (%s, %s, %s)
-                """, (username, ip, user_agent))
-                conn.commit()
-            except Exception as e:
-                print("FAILED LOGIN ERROR:", e)
-
+        # Log failed login
+        db.log_failed_login(username, ip, user_agent)
         _log_auth(username, 'LOGIN_FAILED', 'Invalid credentials', ip, user_agent)
         return _render_login("Invalid username or password.")
 
@@ -774,20 +625,8 @@ def generate_frames():
                 image_path = f"/static/logs/{filename}"
 
                 try:
-                    _ensure_conn()
-                    if cursor:
-                        cursor.execute("""
-                            INSERT INTO detection_logs (
-                                person_detected,
-                                confidence,
-                                image_path
-                            )
-                            VALUES (%s, %s, %s)
-                        """, (True, 0.90, image_path))
-                        conn.commit()
-                        print(f"Motion logged: {image_path}")
-                    else:
-                        print("INSERT WARNING: No database connection for motion log")
+                    db.log_detection(True, 0.90, image_path)
+                    print(f"Motion logged: {image_path}")
                 except Exception as e:
                     print("INSERT ERROR:", e)
 
@@ -892,25 +731,9 @@ def logs():
     if not session.get('logged_in'):
         return jsonify({"error": "unauthorized", "logs": []}), 401
 
-    _ensure_conn()
     try:
-        cursor.execute("""
-            SELECT
-                person_detected,
-                confidence,
-                image_path,
-                detected_at
-            FROM detection_logs
-            ORDER BY id DESC
-            LIMIT 20
-        """)
-        rows = cursor.fetchall()
-
-        cursor.execute(
-            "SELECT COUNT(*) FROM detection_logs WHERE detected_at::date = %s",
-            (date.today(),)
-        )
-        motion_today = cursor.fetchone()[0]
+        rows = db.get_recent_detections(20)
+        motion_today = db.count_detections_today()
 
         return jsonify({
             "logs": [
@@ -921,13 +744,12 @@ def logs():
                     "image_filename": r[2].split('/')[-1] if r[2] else None,
                     "time": str(r[3])
                 }
-                for r in rows
+                for r in (rows or [])
             ],
             "motion_today": motion_today
         })
 
     except Exception as e:
-
         return jsonify({
             "error": str(e),
             "logs": [],
@@ -940,18 +762,12 @@ def logs():
 @app.route('/failed-logins-page')
 @require_admin
 def failed_logins_page():
-    _ensure_conn()
     try:
-        cursor.execute("""
-            SELECT username, attempted_at, ip_address, user_agent
-            FROM failed_login_attempts
-            ORDER BY id DESC LIMIT 50
-        """)
-        rows = cursor.fetchall()
+        rows = db.get_recent_failed_logins(50)
+        unique_ips = len(set(r[2] for r in (rows or []) if r[2]))
+        return render_template("failed_logins.html", logs=rows or [], unique_ips=unique_ips, role=session.get('role'))
     except:
-        rows = []
-    unique_ips = len(set(r[2] for r in rows if r[2]))
-    return render_template("failed_logins.html", logs=rows, unique_ips=unique_ips, role=session.get('role'))
+        return render_template("failed_logins.html", logs=[], unique_ips=0, role=session.get('role'))
 
 # =========================
 # AUTH LOGS API
@@ -962,21 +778,10 @@ def login_logs():
         return jsonify({"error": "unauthorized", "logs": []}), 401
     if session.get('role') != 'admin':
         return jsonify({"logs": []})
-    _ensure_conn()
+    
     try:
-        cursor.execute("""
-            SELECT username, action, reason, ip_address, timestamp
-            FROM auth_logs
-            ORDER BY id DESC
-            LIMIT 50
-        """)
-        rows = cursor.fetchall()
-
-        cursor.execute(
-            "SELECT COUNT(*) FROM auth_logs WHERE timestamp::date = %s",
-            (date.today(),)
-        )
-        auth_today = cursor.fetchone()[0]
+        rows = db.get_recent_auth_logs(50)
+        auth_today = db.count_auth_logs_today()
 
         return jsonify({
             "logs": [
@@ -987,7 +792,7 @@ def login_logs():
                     "ip": r[3],
                     "time": str(r[4])
                 }
-                for r in rows
+                for r in (rows or [])
             ],
             "auth_today": auth_today
         })
@@ -1001,16 +806,11 @@ def login_logs():
 def stats():
     if not session.get('logged_in'):
         return jsonify({"error": "unauthorized"}), 401
-    _ensure_conn()
+    
     try:
-        from datetime import date
-        today = date.today()
-        cursor.execute("SELECT COUNT(*) FROM detection_logs WHERE detected_at::date = %s", (today,))
-        motion_today = cursor.fetchone()[0]
-        cursor.execute("SELECT COUNT(*) FROM failed_login_attempts WHERE attempted_at::date = %s", (today,))
-        failed_today = cursor.fetchone()[0]
-        cursor.execute("SELECT COUNT(*) FROM auth_logs WHERE timestamp::date = %s", (today,))
-        auth_today = cursor.fetchone()[0]
+        motion_today = db.count_detections_today()
+        failed_today = db.count_failed_logins_today()
+        auth_today = db.count_auth_logs_today()
         return jsonify({"motion_today": motion_today, "failed_logins_today": failed_today, "auth_events_today": auth_today})
     except Exception as e:
         return jsonify({"error": str(e), "motion_today": 0, "failed_logins_today": 0, "auth_events_today": 0})
@@ -1027,8 +827,8 @@ def export_motion():
     writer = csv_mod.writer(output)
     writer.writerow(['ID', 'Person Detected', 'Confidence', 'Image Path', 'Detected At'])
     try:
-        cursor.execute("SELECT id, person_detected, confidence, image_path, detected_at FROM detection_logs ORDER BY id DESC")
-        for row in cursor.fetchall():
+        rows = db.get_all_detections()
+        for row in (rows or []):
             writer.writerow(row)
     except Exception as e:
         writer.writerow(['Error', str(e)])
@@ -1047,8 +847,8 @@ def export_auth():
     writer = csv_mod.writer(output)
     writer.writerow(['ID', 'Username', 'Action', 'Reason', 'IP Address', 'User Agent', 'Timestamp'])
     try:
-        cursor.execute("SELECT id, username, action, reason, ip_address, user_agent, timestamp FROM auth_logs ORDER BY id DESC")
-        for row in cursor.fetchall():
+        rows = db.get_all_auth_logs()
+        for row in (rows or []):
             writer.writerow(row)
     except Exception as e:
         writer.writerow(['Error', str(e)])
@@ -1064,25 +864,23 @@ def export_auth():
 @app.route('/system-status')
 @require_admin
 def system_status():
-    _ensure_conn()
     db_ok = False
     try:
-        cursor.execute("SELECT 1")
-        db_ok = True
+        result = db.execute_query("SELECT 1", fetch=True)
+        db_ok = result is not None
     except Exception:
         pass
+    
     cam_ok = camera is not None
+    
     try:
-        cursor.execute("SELECT COUNT(*) FROM detection_logs")
-        total_motion = cursor.fetchone()[0]
-        cursor.execute("SELECT COUNT(*) FROM auth_logs")
-        total_auth = cursor.fetchone()[0]
-        cursor.execute("SELECT COUNT(*) FROM users")
-        total_users = cursor.fetchone()[0]
-        cursor.execute("SELECT COUNT(*) FROM failed_login_attempts")
-        total_failed = cursor.fetchone()[0]
+        total_motion = db.count_total_detections()
+        total_auth = db.count_total_auth_logs()
+        total_users = db.count_total_users()
+        total_failed = db.count_total_failed_logins()
     except Exception:
         total_motion = total_auth = total_users = total_failed = 0
+    
     return render_template('system_status.html',
         db_ok=db_ok, cam_ok=cam_ok,
         total_motion=total_motion, total_auth=total_auth,

@@ -3,12 +3,14 @@
 Railway Deployment Initialization Hook
 This runs ONCE when the app starts on Railway
 Creates all tables in the Railway PostgreSQL database
+Auto-detects DATABASE_URL environment variable
 """
 
 import os
 import sys
 import psycopg2
 from dotenv import load_dotenv
+from urllib.parse import urlparse
 import time
 
 load_dotenv()
@@ -16,13 +18,32 @@ load_dotenv()
 def init_railway_database():
     """Initialize database on Railway startup"""
     
-    config = {
-        "host": os.environ.get("DB_HOST"),
-        "port": os.environ.get("DB_PORT"),
-        "user": os.environ.get("DB_USER"),
-        "password": os.environ.get("DB_PASSWORD"),
-        "database": os.environ.get("DB_NAME"),
-    }
+    # Try to parse DATABASE_URL first (Railway auto-sets this)
+    db_url = os.environ.get("DATABASE_URL")
+    
+    if db_url:
+        # Parse DATABASE_URL
+        url = urlparse(db_url)
+        config = {
+            "host": url.hostname,
+            "port": url.port or 5432,
+            "user": url.username,
+            "password": url.password,
+            "database": url.path.lstrip("/"),
+            "connect_timeout": 10,
+            "sslmode": "require",  # Railway requires SSL
+        }
+        print("✅ Using DATABASE_URL (Railway PostgreSQL)")
+    else:
+        # Fall back to individual environment variables
+        config = {
+            "host": os.environ.get("DB_HOST"),
+            "port": int(os.environ.get("DB_PORT", "5432")),
+            "user": os.environ.get("DB_USER"),
+            "password": os.environ.get("DB_PASSWORD"),
+            "database": os.environ.get("DB_NAME"),
+        }
+        print("ℹ️  Using individual DB_* environment variables")
     
     print("\n" + "="*70)
     print("🚀 RAILWAY DATABASE INITIALIZATION")
