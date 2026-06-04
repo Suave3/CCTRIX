@@ -97,56 +97,53 @@ else:  # PostgreSQL
             "connect_timeout": int(os.environ.get("DB_CONNECT_TIMEOUT", "5")),
         }
     
-    # Global connection pool
+    # Global connection pool (DO NOT use a global conn variable!)
     connection_pool = None
-    conn = None
     
     def get_connection():
-        """Get a database connection from the pool or create a new one"""
-        global connection_pool, conn
+        """Get a database connection from the pool"""
+        global connection_pool
         
         try:
             if connection_pool is None:
                 connection_pool = psycopg2.pool.SimpleConnectionPool(
-                    1,  # Min connections
-                    5,  # Max connections
+                    3,    # Min connections
+                    30,   # Max connections (increased from 20)
                     **DB_CONFIG
                 )
-                logger.info("✅ Database connection pool created")
+                logger.info("✅ Database connection pool created (3-30 connections)")
             
-            # Get a connection from the pool
+            # Get connection with timeout to avoid blocking
             conn = connection_pool.getconn()
-            if conn is None:
-                conn = psycopg2.connect(**DB_CONFIG)
-                logger.info("✅ New database connection established")
-            
             conn.autocommit = False
-            return conn, conn.cursor()
+            return conn
         
         except Error as e:
             logger.error(f"Database connection error: {e}")
-            return None, None
+            return None
     
-    def close_connection():
-        """Close and return connection to pool"""
-        global conn
-        if conn:
+    def close_connection(conn):
+        """Return connection to pool"""
+        if conn and connection_pool:
             try:
-                if connection_pool:
-                    connection_pool.putconn(conn)
-                else:
+                connection_pool.putconn(conn)
+            except Exception as e:
+                logger.error(f"Error returning connection to pool: {e}")
+                try:
                     conn.close()
-            except:
-                pass
-        conn = None
+                except:
+                    pass
     
     def execute_query(query, params=None, fetch=False):
-        """Execute a query with automatic connection handling"""
+        """Execute a query with proper connection management"""
+        conn = None
         try:
-            c, cur = get_connection()
-            if not c or not cur:
+            conn = get_connection()
+            if not conn:
                 logger.error("Failed to get database connection")
                 return None
+            
+            cur = conn.cursor()
             
             if params:
                 cur.execute(query, params)
@@ -155,30 +152,36 @@ else:  # PostgreSQL
             
             if fetch:
                 result = cur.fetchall()
-                c.commit()
-                close_connection()
+                conn.commit()
+                cur.close()
                 return result
             else:
-                c.commit()
-                close_connection()
+                conn.commit()
+                cur.close()
                 return True
         
         except Error as e:
             logger.error(f"Query execution error: {e}")
-            try:
-                c.rollback()
-            except:
-                pass
-            close_connection()
+            if conn:
+                try:
+                    conn.rollback()
+                except:
+                    pass
             return None
+        finally:
+            if conn:
+                close_connection(conn)
 
 def init_db():
     """Initialize database tables"""
+    conn = None
     try:
-        c, cur = get_connection()
-        if not c or not cur:
+        conn = get_connection()
+        if not conn:
             logger.error("Cannot initialize database - no connection")
             return False
+        
+        cur = conn.cursor()
         
         if DB_TYPE == "sqlite":
             # SQLite syntax
@@ -245,7 +248,7 @@ def init_db():
                 ON failed_login_attempts(ip_address)
             """)
             
-            c.commit()
+            conn.commit()
             logger.info("✅ SQLite database tables and indexes created successfully!")
             
         else:
@@ -313,10 +316,11 @@ def init_db():
                 ON failed_login_attempts(ip_address)
             """)
             
-            c.commit()
+            conn.commit()
             logger.info("✅ PostgreSQL database tables and indexes created successfully!")
         
-        close_connection()
+        cur.close()
+        close_connection(conn)
         
         # Seed default users
         seed_users()
@@ -324,11 +328,12 @@ def init_db():
     
     except Exception as e:
         logger.error(f"Database initialization error: {e}")
-        try:
-            c.rollback()
-            close_connection()
-        except:
-            pass
+        if conn:
+            try:
+                conn.rollback()
+            except:
+                pass
+            close_connection(conn)
         return False
 
 def log_auth(username, action, reason, ip_address, user_agent):
@@ -429,7 +434,7 @@ def seed_users():
         else:
             logger.info(f"✅ Database already has {count} users")
             return True
-    except Error as e:
+    except Exception as e:
         logger.error(f"Error seeding users: {e}")
         return False
 

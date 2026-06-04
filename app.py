@@ -12,6 +12,8 @@ import psycopg2
 from dotenv import load_dotenv
 from PIL import Image
 import database as db
+import threading
+from queue import Queue
 
 # Optional imports for GUI/camera functionality (may not be available in cloud)
 try:
@@ -323,6 +325,41 @@ motion_active = False
 last_capture_time = 0
 last_motion_time = 0
 stable_motion_state = False
+last_detection_log_time = 0  # Track when we last logged a detection (for continuous logging every 1 second)
+current_timestamp = ""  # Store timestamp for all frames
+current_status = "NO MOTION DETECTED"  # Store status for all frames
+current_status_color = (255, 255, 255)  # Store status color for all frames
+last_rects = []  # Store motion rectangles for display on skipped frames
+
+# =========================
+# ASYNC DATABASE LOGGING
+# =========================
+db_log_queue = Queue(maxsize=100)
+
+def _async_db_logger():
+    """Background thread for database logging to avoid blocking video stream"""
+    while True:
+        try:
+            log_item = db_log_queue.get(timeout=1)
+            if log_item is None:  # Shutdown signal
+                break
+            
+            log_type, args = log_item
+            try:
+                if log_type == 'detection':
+                    db.log_detection(*args)
+                elif log_type == 'auth':
+                    db.log_auth(*args)
+                elif log_type == 'failed_login':
+                    db.log_failed_login(*args)
+            except Exception as e:
+                print(f"Async logging error: {e}")
+        except:
+            pass
+
+# Start async logger thread
+logger_thread = threading.Thread(target=_async_db_logger, daemon=True)
+logger_thread.start()
 
 # =========================
 # LOGIN CHECK
@@ -380,8 +417,11 @@ def _verify_recaptcha(token, ip):
 # AUTH LOGGER
 # =========================
 def _log_auth(username, action, reason, ip, user_agent):
-    """Log authentication events to database"""
-    db.log_auth(username, action, reason, ip, user_agent)
+    """Log authentication events to database (async, non-blocking)"""
+    try:
+        db_log_queue.put_nowait(('auth', (username, action, reason, ip, user_agent)))
+    except:
+        print(f"Auth log queue full, skipping log for {username}")
 
 # =========================
 # ROLE GUARD
@@ -441,8 +481,11 @@ def login():
             _log_auth(username, 'LOGIN_SUCCESS', 'Valid credentials', ip, user_agent)
             return redirect(url_for('index'))
 
-        # Log failed login
-        db.log_failed_login(username, ip, user_agent)
+        # Log failed login (async)
+        try:
+            db_log_queue.put_nowait(('failed_login', (username, ip, user_agent)))
+        except:
+            print(f"Failed login log queue full for {username}")
         _log_auth(username, 'LOGIN_FAILED', 'Invalid credentials', ip, user_agent)
         return _render_login("Invalid username or password.")
 
@@ -479,23 +522,23 @@ def generate_frames():
     global last_capture_time
     global last_motion_time
     global stable_motion_state
+    global last_detection_log_time
+    global current_timestamp
+    global current_status
+    global current_status_color
+    global last_rects
 
     # Check if OpenCV is available
     if cv2 is None:
         print("⚠️  OpenCV not available - cannot generate video stream")
         while True:
-            # Return placeholder with numpy
             blank = np.ones((500, 800, 3), dtype=np.uint8) * 255
-            
-            # Use PIL to create text on image since cv2 not available
             from PIL import ImageDraw, ImageFont
             img = Image.fromarray(blank)
             draw = ImageDraw.Draw(img)
             draw.text((150, 240), "Video unavailable in cloud mode", fill=(0, 0, 255))
-            
             frame_array = np.array(img)
             ret, buffer = cv2.imencode('.jpg', frame_array) if cv2 else (False, None)
-            
             if ret and buffer is not None:
                 yield (
                     b'--frame\r\n'
@@ -508,11 +551,8 @@ def generate_frames():
 
     # Railway mode - no camera
     if camera is None:
-
         while True:
-
             blank = np.ones((500, 800, 3), dtype=np.uint8) * 255
-
             cv2.putText(
                 blank,
                 "Railway Cloud Mode - No Camera",
@@ -522,157 +562,188 @@ def generate_frames():
                 (0, 0, 255),
                 2
             )
-
-            ret, buffer = cv2.imencode('.jpg', blank)
-
+            ret, buffer = cv2.imencode('.jpg', blank, [cv2.IMWRITE_JPEG_QUALITY, 70])
             frame_bytes = buffer.tobytes()
-
             yield (
                 b'--frame\r\n'
                 b'Content-Type: image/jpeg\r\n\r\n'
                 + frame_bytes +
                 b'\r\n'
             )
-
             time.sleep(0.1)
+        return
+
+    # ===== OPTIMIZATION PARAMETERS =====
+    FRAME_SKIP = 1  # Process every frame for maximum accuracy
+    BLUR_KERNEL = 5  # Smaller kernel for faster processing and better edge detection
+    MIN_CONTOUR_AREA = 800  # Minimum area to reduce noise and false positives (green squares)
+    MOTION_THRESHOLD = 15  # Lower threshold for higher sensitivity
+    JPEG_QUALITY = 50  # JPEG compression quality (0-100, lower = faster and smaller files)
+    MAX_FPS = 30  # Limit output to 30 fps for responsive display
+    FRAME_TIME = 1.0 / MAX_FPS  # Time between frames
+    
+    frame_count = 0
+    last_frame_time = time.time()
 
     while True:
+        try:
+            success, frame = camera.read()
 
-        success, frame = camera.read()
-
-        if not success:
-            time.sleep(0.1)
-            continue
-
-        frame = cv2.flip(frame, 1)
-
-        frame = cv2.resize(frame, (800, 500))
-
-        display = frame.copy()
-
-        clean = frame.copy()
-
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-
-        gray = cv2.GaussianBlur(gray, (21, 21), 0)
-
-        if previous_frame is None:
-
-            previous_frame = gray
-
-            continue
-
-        diff = cv2.absdiff(previous_frame, gray)
-
-        thresh = cv2.threshold(
-            diff,
-            25,
-            255,
-            cv2.THRESH_BINARY
-        )[1]
-
-        thresh = cv2.dilate(thresh, None, iterations=2)
-
-        contours, _ = cv2.findContours(
-            thresh,
-            cv2.RETR_EXTERNAL,
-            cv2.CHAIN_APPROX_SIMPLE
-        )
-
-        motion = False
-
-        for c in contours:
-
-            if cv2.contourArea(c) < 1000:
+            if not success:
+                time.sleep(0.01)
                 continue
 
-            motion = True
+            frame_count += 1
+            
+            # SKIP FRAMES: Only process every Nth frame
+            if frame_count % FRAME_SKIP != 0:
+                # Still encode and send, but skip detection processing
+                display = cv2.flip(frame, 1)
+                display = cv2.resize(display, (800, 500))
+                
+                # Add stored overlays to skipped frames for smooth display
+                # Draw motion rectangles from last detection
+                for rect in last_rects:
+                    x, y, w, h = rect
+                    cv2.rectangle(display, (x, y), (x + w, y + h), (0, 255, 0), 2)
+                
+                # Add current status and timestamp to maintain continuous display
+                if current_status:
+                    cv2.putText(display, current_status, (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.9, current_status_color, 2)
+                if current_timestamp:
+                    cv2.putText(display, current_timestamp, (20, 480), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                
+                ret, buffer = cv2.imencode('.jpg', display, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
+                if ret:
+                    frame_bytes = buffer.tobytes()
+                    yield (
+                        b'--frame\r\n'
+                        b'Content-Type: image/jpeg\r\n\r\n'
+                        + frame_bytes +
+                        b'\r\n'
+                    )
+                continue
 
-            x, y, w, h = cv2.boundingRect(c)
+            # === DETECTION PROCESSING (runs every FRAME_SKIP frames) ===
+            frame = cv2.flip(frame, 1)
+            frame = cv2.resize(frame, (800, 500))
+            display = frame.copy()
+            clean = frame.copy()
 
-            cv2.rectangle(
-                display,
-                (x, y),
-                (x + w, y + h),
-                (0, 255, 0),
-                2
-            )
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            # OPTIMIZATION: Smaller blur kernel for faster processing
+            gray = cv2.GaussianBlur(gray, (BLUR_KERNEL, BLUR_KERNEL), 0)
 
-        previous_frame = gray
+            if previous_frame is None:
+                previous_frame = gray
+                # Still yield frame even if first frame
+                current_timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                current_status = "Initializing..."
+                current_status_color = (255, 255, 255)
+                cv2.putText(display, current_status, (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.9, current_status_color, 2)
+                cv2.putText(display, current_timestamp, (20, 480), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                ret, buffer = cv2.imencode('.jpg', display, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
+                if ret:
+                    frame_bytes = buffer.tobytes()
+                    yield (
+                        b'--frame\r\n'
+                        b'Content-Type: image/jpeg\r\n\r\n'
+                        + frame_bytes +
+                        b'\r\n'
+                    )
+                continue
 
-        now = time.time()
+            diff = cv2.absdiff(previous_frame, gray)
+            thresh = cv2.threshold(diff, MOTION_THRESHOLD, 255, cv2.THRESH_BINARY)[1]
+            # Better morphological operations for accurate motion detection
+            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+            thresh = cv2.dilate(thresh, kernel, iterations=2)
+            thresh = cv2.erode(thresh, kernel, iterations=1)  # Clean up noise
+            # Additional dilation for better edge connectivity
+            thresh = cv2.dilate(thresh, kernel, iterations=1)
 
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-        if motion:
+            motion = False
+            last_rects = []  # Reset rectangles for this frame
+            for c in contours:
+                area = cv2.contourArea(c)
+                # Detect any motion above minimum threshold
+                if area < MIN_CONTOUR_AREA:
+                    continue
+                
+                # Filter out very elongated or thin contours (noise)
+                x, y, w, h = cv2.boundingRect(c)
+                aspect_ratio = float(w) / h if h > 0 else 0
+                if aspect_ratio > 10 or aspect_ratio < 0.1:  # Skip extreme shapes
+                    continue
+                    
+                motion = True
+                last_rects.append((x, y, w, h))  # Store rectangle for display on skipped frames
+                cv2.rectangle(display, (x, y), (x + w, y + h), (0, 255, 0), 2)
 
-            last_motion_time = now
+            previous_frame = gray
+            now = time.time()
+            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-            stable_motion_state = True
+            if motion:
+                last_motion_time = now
+                stable_motion_state = True
 
-            if not motion_active and now - last_capture_time > 5:
+                # Log detection every 1 second of continuous motion (infinite logging)
+                if (now - last_detection_log_time) > 1.0:
+                    last_detection_log_time = now
+                    # Use milliseconds to ensure unique filename even for rapid detections
+                    filename = f"{int(now * 1000)}.jpg"
+                    path = os.path.join(LOGS_DIR, filename)
+                    # Save image SYNCHRONOUSLY to ensure file exists before logging
+                    try:
+                        cv2.imwrite(path, clean, [cv2.IMWRITE_JPEG_QUALITY, 50])
+                    except Exception as e:
+                        print(f"Error saving detection image: {e}")
+                    image_path = f"/static/logs/{filename}"
+                    
+                    # OPTIMIZATION: Queue logging instead of blocking
+                    try:
+                        db_log_queue.put_nowait(('detection', (True, 0.90, image_path)))
+                    except:
+                        print("DB log queue full, skipping detection log")
 
-                motion_active = True
+            # Stable motion state: set to False only after 3 seconds without motion for faster clearing
+            if now - last_motion_time > 3:
+                stable_motion_state = False
+                last_rects = []  # Clear rectangles when motion ends
 
-                last_capture_time = now
+            # Update global status and timestamp for display on all frames
+            current_status = "MOTION DETECTED" if stable_motion_state else "NO MOTION DETECTED"
+            current_status_color = (0, 0, 255) if stable_motion_state else (255, 255, 255)
+            current_timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-                filename = f"{int(now)}.jpg"
+            cv2.putText(display, current_status, (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.9, current_status_color, 2)
+            cv2.putText(display, current_timestamp, (20, 480), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
 
-                path = os.path.join(LOGS_DIR, filename)
+            # OPTIMIZATION: Reduced JPEG quality for faster encoding
+            ret, buffer = cv2.imencode('.jpg', display, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
 
-                cv2.imwrite(path, clean)
-
-                image_path = f"/static/logs/{filename}"
-
-                try:
-                    db.log_detection(True, 0.90, image_path)
-                    print(f"Motion logged: {image_path}")
-                except Exception as e:
-                    print("INSERT ERROR:", e)
-
-        if now - last_motion_time > 2:
-            stable_motion_state = False
-        else:
-            motion_active = False
-
-        status = (
-            "MOTION DETECTED"
-            if stable_motion_state
-            else "NO MOTION DETECTED"
-        )
-
-        cv2.putText(
-            display,
-            status,
-            (20, 40),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.9,
-            (0, 0, 255)
-            if stable_motion_state
-            else (255, 255, 255),
-            2
-        )
-
-        cv2.putText(
-            display,
-            timestamp,
-            (20, 480),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.7,
-            (0, 255, 0),
-            2
-        )
-
-        ret, buffer = cv2.imencode('.jpg', display)
-
-        frame_bytes = buffer.tobytes()
-
-        yield (
-            b'--frame\r\n'
-            b'Content-Type: image/jpeg\r\n\r\n'
-            + frame_bytes +
-            b'\r\n'
-        )
+            if ret:
+                frame_bytes = buffer.tobytes()
+                yield (
+                    b'--frame\r\n'
+                    b'Content-Type: image/jpeg\r\n\r\n'
+                    + frame_bytes +
+                    b'\r\n'
+                )
+            
+            # OPTIMIZATION: Frame rate limiting to avoid overwhelming clients
+            elapsed = time.time() - last_frame_time
+            if elapsed < FRAME_TIME:
+                time.sleep(FRAME_TIME - elapsed)
+            last_frame_time = time.time()
+            
+        except Exception as e:
+            print(f"Frame generation error: {e}")
+            time.sleep(0.01)
+            continue
 
 # =========================
 # VIDEO ROUTE
@@ -712,13 +783,17 @@ def motion_image(filename):
         return jsonify({"error": "file not found"}), 404
     
     try:
-        return send_file(
+        response = send_file(
             file_path,
             mimetype='image/jpeg',
             as_attachment=False,
-            download_name=filename,
-            max_age=86400  # Cache for 24 hours
+            download_name=filename
         )
+        # Prevent browser caching to show fresh images immediately
+        response.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
+        response.headers['Pragma'] = 'no-cache'
+        response.headers['Expires'] = '0'
+        return response
     except Exception as e:
         print(f"Error serving image {filename}: {e}")
         return jsonify({"error": "could not serve image"}), 500

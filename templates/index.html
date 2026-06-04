@@ -204,7 +204,7 @@ body{
 @media(min-width:900px){
   .main{
     flex-direction:row;
-    align-items:flex-start;
+    align-items:stretch;
     padding:0 20px 20px;
   }
 }
@@ -332,9 +332,10 @@ body{
   width:100%;
   display:flex;flex-direction:column;
   min-height:0;
+  flex:1;
 }
 @media(min-width:900px){
-  .logs-section{flex:1.2;min-width:0;max-height:calc(100dvh - var(--header-h) - 130px);position:sticky;top:calc(var(--header-h) + 14px)}
+  .logs-section{flex:1.2;min-width:0;height:auto;position:relative;top:0}
 }
 
 .logs-card{
@@ -698,7 +699,7 @@ body{
         </span>
         <span class="cam-refresh">
           <span class="refresh-spin" id="refresh-spin" aria-hidden="true"></span>
-          Polling logs every 2s
+          Polling logs every 300ms
         </span>
         <span style="font-size:12px;font-family:'Fira Code',monospace;color:var(--muted)">
           {{ session.get('username','') }} · CCTRIX v2
@@ -954,7 +955,7 @@ async function loadMotionLogs() {
         seenMotion.add(log.time);
         const div = document.createElement('div');
         div.className = 'log-item';
-        const imgSrc = log.image_filename ? `/api/motion-image/${log.image_filename}` : '';
+        const imgSrc = log.image_filename ? `/api/motion-image/${log.image_filename}?t=${Date.now()}` : '';
         div.innerHTML = `<img class="log-thumb" src="${imgSrc}" alt="Motion snapshot" loading="lazy" onerror="this.style.opacity='0.3'"><div class="log-body"><div class="log-title"><span class="badge motion">MOTION</span></div><div class="log-time">${new Date(log.time).toLocaleString('en-US',{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false})}</div></div>`;
         container.appendChild(div);
       });
@@ -968,7 +969,7 @@ async function loadMotionLogs() {
       if (!seenMotion.has(log.time)) {
         seenMotion.add(log.time);
         hasNew = true;
-        const imgSrc = log.image_filename ? `/api/motion-image/${log.image_filename}` : '';
+        const imgSrc = log.image_filename ? `/api/motion-image/${log.image_filename}?t=${Date.now()}` : '';
         prependLogItem(container, `<div class="log-item"><img class="log-thumb" src="${imgSrc}" alt="Motion snapshot" loading="lazy" onerror="this.style.opacity='0.3'"><div class="log-body"><div class="log-title"><span class="badge motion">MOTION</span></div><div class="log-time">${new Date(log.time).toLocaleString('en-US',{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false})}</div></div></div>`, true);
       }
     });
@@ -1059,9 +1060,9 @@ async function loadStats() {
 loadMotionLogs();
 loadLoginLogs();
 loadStats();
-setInterval(loadMotionLogs, 2000);
-setInterval(loadLoginLogs, 2000);
-setInterval(loadStats, 10000);
+setInterval(loadMotionLogs, 300);  // Check for new detections every 300ms for ultra-fast display
+setInterval(loadLoginLogs, 3000);
+setInterval(loadStats, 8000);  // Update stats every 8 seconds
 
 // Reduced motion support
 if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
