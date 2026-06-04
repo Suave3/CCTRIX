@@ -173,7 +173,13 @@ def _seed_users():
         print("SEED ERROR:", e)
 
 
-init_db()
+# Initialize database on startup (but don't crash if it fails)
+try:
+    init_db()
+    print("✅ Database initialized on startup")
+except Exception as e:
+    print(f"⚠️  Database init deferred: {e}")
+    print("   Database will be initialized on first request")
 
 # =========================
 # FOLDERS
