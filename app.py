@@ -11,6 +11,11 @@ import numpy as np
 from datetime import datetime, date, timedelta
 import psycopg2
 from dotenv import load_dotenv
+import mss
+from PIL import Image
+import pygetwindow
+import win32gui
+import win32con
 
 load_dotenv()
 
@@ -21,8 +26,8 @@ app.static_url_path = "/static"
 
 # reCAPTCHA v2 — uses Google's official test keys by default for local development.
 # Replace with real keys from https://www.google.com/recaptcha/admin in production.
-RECAPTCHA_SITE_KEY   = os.environ.get("RECAPTCHA_SITE_KEY",   "6LeIxAcTAAAAAJcZVRqyHh71UMIEGNQ_MXjiZKhI")
-RECAPTCHA_SECRET_KEY = os.environ.get("RECAPTCHA_SECRET_KEY", "6LeIxAcTAAAAAGG-vFI1TnRWxMZNFuojJ17ZFtSe")
+RECAPTCHA_SITE_KEY   = os.environ.get("RECAPTCHA_SITE_KEY",   "6LdL4AgtAAAAACyhJQgVnU9kd4xzYfeAz-EYk9IU")
+RECAPTCHA_SECRET_KEY = os.environ.get("RECAPTCHA_SECRET_KEY", "6LdL4AgtAAAAAJmX-CHFzJQBtG4-V7DAvK17yUMM")
 
 # =========================
 # DATABASE CONNECTION
@@ -160,23 +165,246 @@ os.makedirs(LOGS_DIR, exist_ok=True)
 print(f"Logs directory: {LOGS_DIR}")
 
 # =========================
-# CAMERA
+# CAMERA & SCREEN CAPTURE
 # =========================
+
+# Screen capture class that mimics cv2.VideoCapture interface
+class ScreenCapture:
+    def __init__(self, monitor_id=1, window_title="V380"):
+        """
+        Initialize screen capture. Captures only the V380 app window.
+        Falls back to full screen if window not found.
+        """
+        self.sct = mss.mss()
+        self.is_open = True
+        self.window_title = window_title
+        self.monitor_bounds = None
+        self.window_hwnd = None
+        self.monitor = self.sct.monitors[monitor_id]
+        self.frame_count = 0
+        self.log_interval = 30  # Log every 30 frames
+        
+        # Try to find the V380 window
+        self._find_window()
+        
+        if self.window_hwnd and self.monitor_bounds:
+            print(f"✓ Screen capture initialized for V380 window")
+            print(f"  Window Handle: {self.window_hwnd}")
+            print(f"  Bounds: {self.monitor_bounds}")
+        else:
+            print(f"! V380 window not found. Falling back to full screen capture")
+            print(f"  Available monitors: {len(self.sct.monitors)}")
+            if self.monitor:
+                print(f"  Using monitor: {self.monitor}")
+    
+    def _find_window(self):
+        """Find V380 window and get its bounds"""
+        try:
+            # First try with win32gui for more reliable detection
+            def enum_windows_callback(hwnd, lParam):
+                if win32gui.IsWindowVisible(hwnd):
+                    title = win32gui.GetWindowText(hwnd)
+                    if self.window_title.lower() in title.lower():
+                        print(f"✓ Found window: '{title}'")
+                        self.window_hwnd = hwnd
+                        # Get window rectangle
+                        rect = win32gui.GetWindowRect(hwnd)
+                        left, top, right, bottom = rect
+                        width = right - left
+                        height = bottom - top
+                        
+                        self.monitor_bounds = {
+                            'left': left,
+                            'top': top,
+                            'width': width,
+                            'height': height
+                        }
+                        print(f"  Window rect: left={left}, top={top}, width={width}, height={height}")
+                        return False  # Stop enumeration
+                return True
+            
+            win32gui.EnumWindows(enum_windows_callback, None)
+            
+            if self.window_hwnd:
+                print(f"✓ V380 window successfully detected")
+                return True
+            
+            # Fallback to pygetwindow if win32gui didn't find it
+            print("Trying fallback window detection with pygetwindow...")
+            windows = pygetwindow.getWindowsWithTitle(self.window_title)
+            if windows:
+                window = windows[0]
+                if window and window.width > 0 and window.height > 0:
+                    self.monitor_bounds = {
+                        'left': int(window.left),
+                        'top': int(window.top),
+                        'width': int(window.width),
+                        'height': int(window.height)
+                    }
+                    print(f"✓ V380 window detected via pygetwindow: {self.monitor_bounds}")
+                    return True
+        except Exception as e:
+            print(f"✗ Window detection error: {e}")
+            import traceback
+            traceback.print_exc()
+        
+        return False
+    
+    def read(self):
+        """Capture window frame"""
+        if not self.is_open:
+            return False, None
+        
+        try:
+            # Update window position every frame if we have a handle
+            if self.window_hwnd:
+                try:
+                    rect = win32gui.GetWindowRect(self.window_hwnd)
+                    left, top, right, bottom = rect
+                    width = right - left
+                    height = bottom - top
+                    
+                    self.monitor_bounds = {
+                        'left': left,
+                        'top': top,
+                        'width': width,
+                        'height': height
+                    }
+                    
+                    # Log periodically for debugging
+                    self.frame_count += 1
+                    if self.frame_count % self.log_interval == 0:
+                        print(f"[Frame {self.frame_count}] Capturing V380 window: {self.monitor_bounds}")
+                except Exception as e:
+                    print(f"Error updating window bounds: {e}")
+            else:
+                self.frame_count += 1
+                if self.frame_count % self.log_interval == 0:
+                    print(f"[Frame {self.frame_count}] No window handle, using monitor bounds")
+            
+            # Validate bounds before capturing
+            if self.monitor_bounds and self.monitor_bounds['width'] > 0 and self.monitor_bounds['height'] > 0:
+                try:
+                    screenshot = self.sct.grab(self.monitor_bounds)
+                    if screenshot is None:
+                        raise Exception("mss.grab() returned None")
+                except Exception as e:
+                    print(f"Error capturing window with bounds {self.monitor_bounds}: {e}")
+                    print("Falling back to full screen...")
+                    screenshot = self.sct.grab(self.monitor)
+            else:
+                screenshot = self.sct.grab(self.monitor)
+            
+            # Convert to numpy array and then to OpenCV BGR format
+            img = Image.frombytes('RGB', screenshot.size, screenshot.rgb)
+            frame = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
+            return True, frame
+        except Exception as e:
+            print(f"✗ Screen capture error: {e}")
+            import traceback
+            traceback.print_exc()
+            return False, None
+    
+    def isOpened(self):
+        return self.is_open
+    
+    def release(self):
+        self.is_open = False
+        self.sct.close()
 
 camera = None
 
-# Railway has NO webcam
-# Webcam only works locally
-# Set CAMERA_SOURCE=0 for webcam, or RTSP URL for IP camera
+# Railway has NO webcam.
+# Local webcam is the default when running locally.
+# Use CAMERA_SOURCE=0 for the device camera, or RTSP URL, or "screen" for screen capture
+# Example: rtsp://username:password@192.168.1.12:554/live/ch00_01
+# Screen capture: CAMERA_SOURCE=screen
+CAMERA_SOURCE = os.environ.get("CAMERA_SOURCE", "0").strip()
 
-if os.environ.get("RAILWAY_ENVIRONMENT") is None:
-    source = os.environ.get("CAMERA_SOURCE", "0")
-    camera_index = int(source) if source.isdigit() else source
-    camera = cv2.VideoCapture(camera_index)
-    if not camera.isOpened():
-        print("CAMERA ERROR: Unable to open camera source:", source)
-        camera.release()
-        camera = None
+# OpenCV can use the default camera for numeric sources,
+# or RTSP/http streams for network cameras, or screen capture.
+def _open_camera(source):
+    try:
+        # Screen capture mode
+        if source.lower() == "screen":
+            print("Starting screen capture mode (V380 app window)")
+            cam = ScreenCapture(monitor_id=1)
+            if cam.isOpened():
+                print("✓ Screen capture opened successfully")
+                return cam
+            return None
+        
+        if source.isdigit():
+            backends = [getattr(cv2, 'CAP_DSHOW', None), getattr(cv2, 'CAP_MSMF', None), getattr(cv2, 'CAP_ANY', None)]
+            for backend in backends:
+                if backend is None:
+                    continue
+                cam = cv2.VideoCapture(int(source), backend)
+                if cam is not None and cam.isOpened():
+                    print(f"Camera opened successfully on local source {source} with backend {backend}")
+                    return cam
+                if cam is not None:
+                    cam.release()
+            return None
+
+        # For network streams (RTSP/HTTP)
+        backends = []
+        if hasattr(cv2, 'CAP_GSTREAMER'):
+            backends.append(cv2.CAP_GSTREAMER)
+        if hasattr(cv2, 'CAP_FFMPEG'):
+            backends.append(cv2.CAP_FFMPEG)
+        backends.append(getattr(cv2, 'CAP_ANY', None))
+
+        for backend in backends:
+            if backend is None:
+                continue
+            print(f"Trying backend {backend} for {source}")
+            cam = cv2.VideoCapture(source, backend)
+            if cam is None:
+                continue
+            
+            # Set optimized properties for network streams
+            if hasattr(cam, 'set'):
+                try:
+                    cam.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                    cam.set(cv2.CAP_PROP_AUTOFOCUS, 0)
+                except Exception:
+                    pass
+                
+                # Shorter timeout for network streams (5 seconds instead of 30)
+                if hasattr(cv2, 'CAP_PROP_OPEN_TIMEOUT_MSEC'):
+                    try:
+                        cam.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 5000)
+                    except Exception:
+                        pass
+            
+            # Wait a bit for connection to establish
+            time.sleep(2)
+            
+            if cam.isOpened():
+                # Try to read a frame to verify connection
+                ret, frame = cam.read()
+                if ret and frame is not None and frame.size > 0:
+                    print(f"✓ Camera opened successfully: {source} with backend {backend}")
+                    return cam
+                else:
+                    cam.release()
+                    print(f"Camera open with backend {backend} but failed to read frame from: {source}")
+            else:
+                cam.release()
+                print(f"Camera failed to open with backend {backend}: {source}")
+
+        print(f"All backends failed for: {source}")
+        return None
+    except Exception as e:
+        print("CAMERA OPEN ERROR:", e)
+        return None
+
+if CAMERA_SOURCE:
+    print(f"Attempting camera source: {CAMERA_SOURCE}")
+    camera = _open_camera(CAMERA_SOURCE)
+    if camera is None:
+        print("CAMERA ERROR: Unable to open camera source:", CAMERA_SOURCE)
 
 previous_frame = None
 motion_active = False
@@ -215,14 +443,14 @@ def is_ip_blocked(ip):
 # RECAPTCHA VERIFIER
 # =========================
 def _verify_recaptcha(token, ip):
-    # Even in test/local mode, require a token to be present.
-    # In production, real RECAPTCHA_SECRET_KEY in .env will perform actual verification.
-    if not token:
+    # Require a token, even in test/local mode.
+    if not token or not token.strip():
         return False
-    
-    # If using Google's official test keys, allow any non-empty token (local dev only).
+
+    # If using Google's official test keys, accept any non-empty token for local dev.
     if RECAPTCHA_SECRET_KEY == "6LeIxAcTAAAAAGG-vFI1TnRWxMZNFuojJ17ZFtSe":
-        return True  # test key — accept any token
+        return True
+
     try:
         data = urllib.parse.urlencode({
             "secret": RECAPTCHA_SECRET_KEY,
@@ -238,7 +466,7 @@ def _verify_recaptcha(token, ip):
             return result.get("success", False)
     except Exception as e:
         print("reCAPTCHA error:", e)
-        return True  # fail open if Google is unreachable
+        return False
 
 # =========================
 # AUTH LOGGER
@@ -403,6 +631,7 @@ def generate_frames():
         success, frame = camera.read()
 
         if not success:
+            time.sleep(0.1)
             continue
 
         frame = cv2.flip(frame, 1)

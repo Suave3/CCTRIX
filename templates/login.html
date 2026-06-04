@@ -441,10 +441,11 @@ input::placeholder{color:#475569}
           data-theme="dark"
           data-size="normal"
           data-callback="onRecaptchaSuccess"
+          data-expired-callback="onRecaptchaExpired"
         ></div>
       </div>
 
-      <button type="submit" class="submit-btn" id="submit-btn">
+      <button type="submit" class="submit-btn" id="submit-btn" disabled title="Complete reCAPTCHA to enable login">
         <span class="btn-text" style="display:flex;align-items:center;gap:8px">
           <svg width="15" height="15" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M16.5 10.5V6.75a4.5 4.5 0 1 0-9 0v3.75m-.75 11.25h10.5a2.25 2.25 0 0 0 2.25-2.25v-6.75a2.25 2.25 0 0 0-2.25-2.25H6.75a2.25 2.25 0 0 0-2.25 2.25v6.75a2.25 2.25 0 0 0 2.25 2.25Z"/></svg>
           Sign In to CCTRIX
@@ -473,24 +474,66 @@ pwToggle.addEventListener('click', () => {
   pwToggle.setAttribute('aria-label', isHidden ? 'Hide password' : 'Show password');
 });
 
-/* Submit loading state */
+/* Submit loading state and reCAPTCHA enforcement */
+const recaptchaTokenInput = document.getElementById('recaptcha-token');
+const submitBtn = document.getElementById('submit-btn');
+const loginForm = document.getElementById('login-form');
+let recaptchaVerified = false;
+
+window.onRecaptchaSuccess = function(token) {
+  recaptchaVerified = true;
+  if (recaptchaTokenInput) {
+    recaptchaTokenInput.value = token;
+  }
+  if (submitBtn) {
+    submitBtn.disabled = false;
+    submitBtn.title = 'Click to login';
+  }
+};
+
+window.onRecaptchaExpired = function() {
+  recaptchaVerified = false;
+  if (recaptchaTokenInput) {
+    recaptchaTokenInput.value = '';
+  }
+  if (submitBtn) {
+    submitBtn.disabled = true;
+    submitBtn.title = 'Complete reCAPTCHA to enable login';
+  }
+};
+
 document.getElementById('login-form').addEventListener('submit', function(e) {
   const username = document.getElementById('username').value.trim();
   const password = pwInput.value.trim();
-  const recaptcha = document.querySelector('.g-recaptcha-response') ?
-    document.querySelector('.g-recaptcha-response').value : '';
+  const recaptchaValue = document.querySelector('.g-recaptcha-response') ?
+    document.querySelector('.g-recaptcha-response').value.trim() : '';
 
   if (!username || !password) return; // let browser validation handle it
 
-  const btn = document.getElementById('submit-btn');
-  btn.classList.add('loading');
-  btn.disabled = true;
+  if (!recaptchaValue) {
+    e.preventDefault();
+    alert('Please complete the reCAPTCHA challenge before signing in.');
+    if (submitBtn) {
+      submitBtn.classList.remove('loading');
+      submitBtn.disabled = false;
+    }
+    return;
+  }
+
+  if (submitBtn) {
+    submitBtn.classList.add('loading');
+    submitBtn.disabled = true;
+  }
 
   // Re-enable after 8s as a safety fallback
   setTimeout(() => {
-    btn.classList.remove('loading');
-    btn.disabled = false;
-    if (typeof grecaptcha !== 'undefined') grecaptcha.reset();
+    if (submitBtn) {
+      submitBtn.classList.remove('loading');
+      submitBtn.disabled = false;
+    }
+    if (typeof grecaptcha !== 'undefined') {
+      grecaptcha.reset();
+    }
   }, 8000);
 });
 

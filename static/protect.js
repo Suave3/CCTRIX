@@ -123,11 +123,16 @@
     submitBtn.title = 'Complete reCAPTCHA to enable';
     
     // Enable button when reCAPTCHA callback fires
-    window.onRecaptchaSuccess = function() {
+    window.onRecaptchaSuccess = function(token) {
       submitBtn.disabled = false;
       submitBtn.title = '';
     };
-    
+
+    window.onRecaptchaExpired = function() {
+      submitBtn.disabled = true;
+      submitBtn.title = 'Complete reCAPTCHA to enable';
+    };
+
     // Also listen for reCAPTCHA iframe load (backup trigger)
     var observeReCaptcha = function() {
       var iframe = document.querySelector('[title="reCAPTCHA"]');
