@@ -1,7 +1,6 @@
 from flask import Flask, render_template, Response, request, redirect, url_for, session, jsonify
 from werkzeug.security import check_password_hash, generate_password_hash
 from functools import wraps
-import cv2
 import time
 import os
 import json
@@ -11,11 +10,30 @@ import numpy as np
 from datetime import datetime, date, timedelta
 import psycopg2
 from dotenv import load_dotenv
-import mss
 from PIL import Image
-import pygetwindow
-import win32gui
-import win32con
+
+# Optional imports for GUI/camera functionality (may not be available in cloud)
+try:
+    import cv2
+except ImportError:
+    cv2 = None
+
+try:
+    import mss
+except ImportError:
+    mss = None
+
+try:
+    import pygetwindow
+except ImportError:
+    pygetwindow = None
+
+try:
+    import win32gui
+    import win32con
+except ImportError:
+    win32gui = None
+    win32con = None
 
 load_dotenv()
 
@@ -324,9 +342,18 @@ CAMERA_SOURCE = os.environ.get("CAMERA_SOURCE", "0").strip()
 # OpenCV can use the default camera for numeric sources,
 # or RTSP/http streams for network cameras, or screen capture.
 def _open_camera(source):
+    # Skip camera if cv2 is not available (e.g., on Railway cloud)
+    if cv2 is None:
+        print("⚠️  OpenCV (cv2) not available - running in headless mode")
+        return None
+    
     try:
         # Screen capture mode
         if source.lower() == "screen":
+            if mss is None or pygetwindow is None or win32gui is None:
+                print("⚠️  Screen capture requires mss, pygetwindow, win32gui - not available on this platform")
+                return None
+            
             print("Starting screen capture mode (V380 app window)")
             cam = ScreenCapture(monitor_id=1)
             if cam.isOpened():
@@ -596,7 +623,33 @@ def generate_frames():
     global last_motion_time
     global stable_motion_state
 
-    # Railway mode
+    # Check if OpenCV is available
+    if cv2 is None:
+        print("⚠️  OpenCV not available - cannot generate video stream")
+        while True:
+            # Return placeholder with numpy
+            blank = np.ones((500, 800, 3), dtype=np.uint8) * 255
+            
+            # Use PIL to create text on image since cv2 not available
+            from PIL import ImageDraw, ImageFont
+            img = Image.fromarray(blank)
+            draw = ImageDraw.Draw(img)
+            draw.text((150, 240), "Video unavailable in cloud mode", fill=(0, 0, 255))
+            
+            frame_array = np.array(img)
+            ret, buffer = cv2.imencode('.jpg', frame_array) if cv2 else (False, None)
+            
+            if ret and buffer is not None:
+                yield (
+                    b'--frame\r\n'
+                    b'Content-Type: image/jpeg\r\n\r\n'
+                    + buffer.tobytes() +
+                    b'\r\n'
+                )
+            time.sleep(0.1)
+        return
+
+    # Railway mode - no camera
     if camera is None:
 
         while True:
