@@ -217,47 +217,65 @@ logger_thread = threading.Thread(target=_async_db_logger, daemon=True)
 logger_thread.start()
 
 # =========================
-# LOGIN CHECK - BRUTE FORCE PROTECTION
+# BRUTE FORCE PROTECTION - IN-MEMORY TRACKING
 # =========================
-def is_ip_blocked(ip):
-    """
-    Check if an IP is blocked due to too many failed login attempts.
-    Policy: Block after 5 failed attempts within 10 minutes.
-    """
+import time as time_module
+from collections import defaultdict
+
+# Track failed login attempts per IP: {ip: [(timestamp, username), ...]}
+FAILED_ATTEMPTS = defaultdict(list)
+
+def log_failed_attempt(ip, username):
+    """Log a failed login attempt for an IP (in-memory + database)"""
+    current_time = time_module.time()
+    
+    # Add to in-memory tracking
+    FAILED_ATTEMPTS[ip].append((current_time, username))
+    
+    # Clean up old attempts (older than 10 minutes)
+    cutoff_time = current_time - (10 * 60)
+    FAILED_ATTEMPTS[ip] = [(t, u) for t, u in FAILED_ATTEMPTS[ip] if t > cutoff_time]
+    
+    # Also log to database (async)
     try:
-        count = db.get_failed_login_attempts(ip, minutes=10)
-        if count >= 5:
-            print(f"🚫 IP BLOCKED: {ip} has {count} failed attempts in last 10 minutes")
-            return True
-        return False
+        db.log_failed_login(username, ip, "")
     except Exception as e:
-        print(f"IP block check error: {e}")
-        return False
+        print(f"Note: Could not log to database: {e}")
+    
+    print(f"✓ Failed attempt logged: {username} from {ip} - Total in window: {len(FAILED_ATTEMPTS[ip])}")
+    return len(FAILED_ATTEMPTS[ip])
+
+def get_failed_attempt_count(ip):
+    """Get count of failed attempts for an IP in the last 10 minutes (in-memory)"""
+    current_time = time_module.time()
+    cutoff_time = current_time - (10 * 60)
+    
+    # Clean up old attempts
+    if ip in FAILED_ATTEMPTS:
+        FAILED_ATTEMPTS[ip] = [(t, u) for t, u in FAILED_ATTEMPTS[ip] if t > cutoff_time]
+    
+    count = len(FAILED_ATTEMPTS.get(ip, []))
+    print(f"DEBUG: IP {ip} has {count} failed attempts in last 10 minutes")
+    return count
+
+def is_ip_blocked(ip):
+    """Check if an IP is blocked due to too many failed login attempts"""
+    count = get_failed_attempt_count(ip)
+    if count >= 5:
+        print(f"🚫 IP BLOCKED: {ip} has {count} failed attempts")
+        return True
+    return False
 
 def get_ip_block_time_remaining(ip):
-    """
-    Get remaining block time for an IP in seconds.
-    Returns 0 if not blocked.
-    """
-    try:
-        from datetime import datetime, timedelta
-        # Check most recent failed attempt
-        query = """
-            SELECT MAX(attempted_at) FROM failed_login_attempts
-            WHERE ip_address = %s
-        """
-        result = db.execute_query(query, (ip,), fetch=True)
-        if result and result[0][0]:
-            last_attempt = result[0][0]
-            if isinstance(last_attempt, str):
-                last_attempt = datetime.fromisoformat(last_attempt)
-            block_end = last_attempt + timedelta(minutes=10)
-            remaining = (block_end - datetime.now()).total_seconds()
-            return max(0, int(remaining))
+    """Get remaining block time for an IP in seconds"""
+    if not FAILED_ATTEMPTS.get(ip):
         return 0
-    except Exception as e:
-        print(f"Block time calculation error: {e}")
-        return 0
+    
+    # Get the earliest attempt
+    earliest_time = min([t for t, u in FAILED_ATTEMPTS[ip]])
+    block_end = earliest_time + (10 * 60)
+    remaining = block_end - time_module.time()
+    return max(0, int(remaining))
 
 # =========================
 # RECAPTCHA VERIFIER
@@ -359,47 +377,38 @@ def login():
             session['username'] = username
             session['role'] = user[2]
             _log_auth(username, 'LOGIN_SUCCESS', 'Valid credentials', ip, user_agent)
+            print(f"✅ LOGIN SUCCESS: {username} from {ip}")
             return redirect(url_for('index'))
 
-        # Password is wrong - log failed attempt SYNCHRONOUSLY so it's counted immediately
-        try:
-            result = db.log_failed_login(username, ip, user_agent)
-            print(f"✓ Failed login logged: {username} from {ip} - Result: {result}")
-        except Exception as e:
-            print(f"❌ ERROR logging failed attempt: {e}")
-            import traceback
-            traceback.print_exc()
+        # PASSWORD IS WRONG - log the failed attempt
+        print(f"\n{'='*60}")
+        print(f"❌ LOGIN FAILED: Invalid credentials for {username} from {ip}")
+        print(f"{'='*60}")
+        
+        # Log to failed attempts (in-memory)
+        current_count = log_failed_attempt(ip, username)
+        print(f"Total failed attempts for IP {ip}: {current_count}/5")
         
         # Also log to auth logs asynchronously
         _log_auth(username, 'LOGIN_FAILED', 'Invalid credentials', ip, user_agent)
         
-        # Get current failure count for THIS IP - FORCE FRESH COUNT
-        try:
-            current_failures = db.get_failed_login_attempts(ip, minutes=10)
-            print(f"DEBUG: IP {ip} has {current_failures} failed attempts in last 10 minutes")
-        except Exception as e:
-            print(f"❌ ERROR getting failure count: {e}")
-            current_failures = 0
-            import traceback
-            traceback.print_exc()
-        
-        # If they've hit 5 failures, block them
-        if current_failures >= 5:
+        # Check if they're now blocked
+        if current_count >= 5:
             remaining = get_ip_block_time_remaining(ip)
             minutes = remaining // 60
             seconds = remaining % 60
             error_msg = f"🚫 Too many failed login attempts. Your IP is blocked for {minutes}m {seconds}s."
-            print(f"🚫 IP BLOCKED: {ip} after {current_failures} attempts")
+            print(f"🚫 BLOCKING IP: {ip}")
             return _render_login(error_msg)
         
-        # Show how many attempts remain before lockout
-        attempts_remaining = 5 - current_failures
+        # Show how many attempts remain
+        attempts_remaining = 5 - current_count
         if attempts_remaining == 1:
-            error_msg = "❌ Invalid username or password. ⚠️ ONE ATTEMPT REMAINING before 10-minute lockout!"
+            error_msg = f"❌ Invalid username or password. ⚠️ ONE ATTEMPT REMAINING before 10-minute lockout!"
         else:
             error_msg = f"❌ Invalid username or password. ({attempts_remaining} attempts remaining)"
         
-        print(f"DEBUG: Showing {attempts_remaining} attempts remaining to user")
+        print(f"INFO: User has {attempts_remaining} attempts left")
         return _render_login(error_msg, attempts_remaining)
 
     return _render_login()
@@ -883,37 +892,57 @@ def health():
     return jsonify({"status": "ok"})
 
 # =========================
-# DEBUG: Check failed login attempts
+# DEBUG: Check failed login attempts (in-memory)
 # =========================
 @app.route('/debug/failed-logins/<ip_addr>')
 def debug_failed_logins(ip_addr):
     """Debug endpoint to check failed login count for an IP"""
     try:
-        count = db.get_failed_login_attempts(ip_addr, minutes=10)
-        
-        # Also fetch raw data to verify records exist
-        query = """
-            SELECT ip_address, attempted_at, username FROM failed_login_attempts
-            WHERE ip_address = %s
-            ORDER BY attempted_at DESC
-            LIMIT 10
-        """
-        result = db.execute_query(query, (ip_addr,), fetch=True)
+        count = get_failed_attempt_count(ip_addr)
+        attempts = FAILED_ATTEMPTS.get(ip_addr, [])
         
         return jsonify({
             "ip": ip_addr,
             "failed_attempts_last_10min": count,
+            "blocked": count >= 5,
+            "attempts_remaining": max(0, 5 - count),
             "recent_attempts": [
                 {
-                    "ip": r[0],
-                    "timestamp": str(r[1]),
-                    "username": r[2]
+                    "username": username,
+                    "timestamp": datetime.fromtimestamp(timestamp).isoformat()
                 }
-                for r in (result or [])
+                for timestamp, username in attempts
             ]
         })
     except Exception as e:
         return jsonify({"error": str(e), "ip": ip_addr})
+
+@app.route('/debug/clear-attempts/<ip_addr>')
+def debug_clear_attempts(ip_addr):
+    """DEBUG ONLY: Clear all failed attempts for an IP (for testing)"""
+    if ip_addr in FAILED_ATTEMPTS:
+        del FAILED_ATTEMPTS[ip_addr]
+    return jsonify({"message": f"Cleared all attempts for {ip_addr}"})
+
+@app.route('/debug/all-attempts')
+def debug_all_attempts():
+    """DEBUG ONLY: Show all tracked IPs and their attempt counts"""
+    return jsonify({
+        "tracked_ips": {
+            ip: {
+                "count": len(attempts),
+                "blocked": len(attempts) >= 5,
+                "attempts": [
+                    {
+                        "username": u,
+                        "time": datetime.fromtimestamp(t).strftime("%Y-%m-%d %H:%M:%S")
+                    }
+                    for t, u in attempts
+                ]
+            }
+            for ip, attempts in FAILED_ATTEMPTS.items()
+        }
+    })
 
 
 # =========================
