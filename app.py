@@ -21,22 +21,7 @@ try:
 except ImportError:
     cv2 = None
 
-try:
-    import mss
-except ImportError:
-    mss = None
-
-try:
-    import pygetwindow
-except ImportError:
-    pygetwindow = None
-
-try:
-    import win32gui
-    import win32con
-except ImportError:
-    win32gui = None
-    win32con = None
+# Screen capture imports removed - using OBS Virtual Camera instead
 
 load_dotenv()
 
@@ -73,161 +58,41 @@ print(f"Logs directory: {LOGS_DIR}")
 # CAMERA & SCREEN CAPTURE
 # =========================
 
-# Screen capture class that mimics cv2.VideoCapture interface
-class ScreenCapture:
-    def __init__(self, monitor_id=1, window_title="V380"):
-        """
-        Initialize screen capture. Captures only the V380 app window.
-        Falls back to full screen if window not found.
-        """
-        self.sct = mss.mss()
-        self.is_open = True
-        self.window_title = window_title
-        self.monitor_bounds = None
-        self.window_hwnd = None
-        self.monitor = self.sct.monitors[monitor_id]
-        self.frame_count = 0
-        self.log_interval = 30  # Log every 30 frames
-        
-        # Try to find the V380 window
-        self._find_window()
-        
-        if self.window_hwnd and self.monitor_bounds:
-            print(f"✓ Screen capture initialized for V380 window")
-            print(f"  Window Handle: {self.window_hwnd}")
-            print(f"  Bounds: {self.monitor_bounds}")
-        else:
-            print(f"! V380 window not found. Falling back to full screen capture")
-            print(f"  Available monitors: {len(self.sct.monitors)}")
-            if self.monitor:
-                print(f"  Using monitor: {self.monitor}")
-    
-    def _find_window(self):
-        """Find V380 window and get its bounds"""
-        try:
-            # First try with win32gui for more reliable detection
-            def enum_windows_callback(hwnd, lParam):
-                if win32gui.IsWindowVisible(hwnd):
-                    title = win32gui.GetWindowText(hwnd)
-                    if self.window_title.lower() in title.lower():
-                        print(f"✓ Found window: '{title}'")
-                        self.window_hwnd = hwnd
-                        # Get window rectangle
-                        rect = win32gui.GetWindowRect(hwnd)
-                        left, top, right, bottom = rect
-                        width = right - left
-                        height = bottom - top
-                        
-                        self.monitor_bounds = {
-                            'left': left,
-                            'top': top,
-                            'width': width,
-                            'height': height
-                        }
-                        print(f"  Window rect: left={left}, top={top}, width={width}, height={height}")
-                        return False  # Stop enumeration
-                return True
-            
-            win32gui.EnumWindows(enum_windows_callback, None)
-            
-            if self.window_hwnd:
-                print(f"✓ V380 window successfully detected")
-                return True
-            
-            # Fallback to pygetwindow if win32gui didn't find it
-            print("Trying fallback window detection with pygetwindow...")
-            windows = pygetwindow.getWindowsWithTitle(self.window_title)
-            if windows:
-                window = windows[0]
-                if window and window.width > 0 and window.height > 0:
-                    self.monitor_bounds = {
-                        'left': int(window.left),
-                        'top': int(window.top),
-                        'width': int(window.width),
-                        'height': int(window.height)
-                    }
-                    print(f"✓ V380 window detected via pygetwindow: {self.monitor_bounds}")
-                    return True
-        except Exception as e:
-            print(f"✗ Window detection error: {e}")
-            import traceback
-            traceback.print_exc()
-        
-        return False
-    
-    def read(self):
-        """Capture window frame"""
-        if not self.is_open:
-            return False, None
-        
-        try:
-            # Update window position every frame if we have a handle
-            if self.window_hwnd:
-                try:
-                    rect = win32gui.GetWindowRect(self.window_hwnd)
-                    left, top, right, bottom = rect
-                    width = right - left
-                    height = bottom - top
-                    
-                    self.monitor_bounds = {
-                        'left': left,
-                        'top': top,
-                        'width': width,
-                        'height': height
-                    }
-                    
-                    # Log periodically for debugging
-                    self.frame_count += 1
-                    if self.frame_count % self.log_interval == 0:
-                        print(f"[Frame {self.frame_count}] Capturing V380 window: {self.monitor_bounds}")
-                except Exception as e:
-                    print(f"Error updating window bounds: {e}")
-            else:
-                self.frame_count += 1
-                if self.frame_count % self.log_interval == 0:
-                    print(f"[Frame {self.frame_count}] No window handle, using monitor bounds")
-            
-            # Validate bounds before capturing
-            if self.monitor_bounds and self.monitor_bounds['width'] > 0 and self.monitor_bounds['height'] > 0:
-                try:
-                    screenshot = self.sct.grab(self.monitor_bounds)
-                    if screenshot is None:
-                        raise Exception("mss.grab() returned None")
-                except Exception as e:
-                    print(f"Error capturing window with bounds {self.monitor_bounds}: {e}")
-                    print("Falling back to full screen...")
-                    screenshot = self.sct.grab(self.monitor)
-            else:
-                screenshot = self.sct.grab(self.monitor)
-            
-            # Convert to numpy array and then to OpenCV BGR format
-            img = Image.frombytes('RGB', screenshot.size, screenshot.rgb)
-            frame = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
-            return True, frame
-        except Exception as e:
-            print(f"✗ Screen capture error: {e}")
-            import traceback
-            traceback.print_exc()
-            return False, None
-    
-    def isOpened(self):
-        return self.is_open
-    
-    def release(self):
-        self.is_open = False
-        self.sct.close()
+# OBS Virtual Camera workflow - see _open_camera() function for details
+# (ScreenCapture class no longer used - replaced with OBS Virtual Camera)
 
 camera = None
 
-# Railway has NO webcam.
-# Local webcam is the default when running locally.
-# Use CAMERA_SOURCE=0 for the device camera, or RTSP URL, or "screen" for screen capture
-# Example: rtsp://username:password@192.168.1.12:554/live/ch00_01
-# Screen capture: CAMERA_SOURCE=screen
+# =========================
+# CAMERA SOURCE: OBS Virtual Camera
+# =========================
+# 
+# WORKFLOW:
+# OBS Window Capture (in OBS app)
+#        ↓
+# OBS Virtual Camera output (enable in Tools > Start Virtual Camera)
+#        ↓
+# OpenCV (cv2.VideoCapture) reads virtual camera as device 0
+#        ↓
+# Flask video_feed streams to Dashboard
+#
+# BENEFITS:
+# - OBS window can be minimized
+# - Clean separation: OBS app handles capture, app handles streaming
+# - Works even when OBS is not active
+#
+# SETUP:
+# 1. Enable OBS Virtual Camera (Tools > Start Virtual Camera)
+# 2. App detects it automatically as device 0
+# 3. Done! Stream will show OBS output
+
+# OBS Virtual Camera is the default (device 0).
+# Use CAMERA_SOURCE=0 for OBS Virtual Camera (recommended)
+# Use CAMERA_SOURCE=1 for a different camera device
+# Use CAMERA_SOURCE=rtsp://... for RTSP network streams
 CAMERA_SOURCE = os.environ.get("CAMERA_SOURCE", "0").strip()
 
-# OpenCV can use the default camera for numeric sources,
-# or RTSP/http streams for network cameras, or screen capture.
+# OpenCV reads from OBS Virtual Camera (numeric source) or RTSP streams
 def _open_camera(source):
     # Skip camera if cv2 is not available (e.g., on Railway cloud)
     if cv2 is None:
@@ -235,30 +100,20 @@ def _open_camera(source):
         return None
     
     try:
-        # Screen capture mode
-        if source.lower() == "screen":
-            if mss is None or pygetwindow is None or win32gui is None:
-                print("⚠️  Screen capture requires mss, pygetwindow, win32gui - not available on this platform")
-                return None
-            
-            print("Starting screen capture mode (V380 app window)")
-            cam = ScreenCapture(monitor_id=1)
-            if cam.isOpened():
-                print("✓ Screen capture opened successfully")
-                return cam
-            return None
         
         if source.isdigit():
+            print(f"🎥 Attempting to open OBS Virtual Camera (device {source})...")
             backends = [getattr(cv2, 'CAP_DSHOW', None), getattr(cv2, 'CAP_MSMF', None), getattr(cv2, 'CAP_ANY', None)]
             for backend in backends:
                 if backend is None:
                     continue
                 cam = cv2.VideoCapture(int(source), backend)
                 if cam is not None and cam.isOpened():
-                    print(f"Camera opened successfully on local source {source} with backend {backend}")
+                    print(f"✓ OBS Virtual Camera opened successfully (device {source}) with backend {backend}")
                     return cam
                 if cam is not None:
                     cam.release()
+            print(f"✗ Failed to open OBS Virtual Camera (device {source}). Make sure Virtual Camera is enabled in OBS (Tools > Start Virtual Camera)")
             return None
 
         # For network streams (RTSP/HTTP)
@@ -337,7 +192,7 @@ last_rects = []  # Store motion rectangles for display on skipped frames
 db_log_queue = Queue(maxsize=100)
 
 def _async_db_logger():
-    """Background thread for database logging to avoid blocking video stream"""
+    """Background threacd for database logging to avoid blocking video stream"""
     while True:
         try:
             log_item = db_log_queue.get(timeout=1)

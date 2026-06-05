@@ -8,10 +8,14 @@ gunicorn==26.0.0
 itsdangerous==2.2.0
 Jinja2==3.1.6
 MarkupSafe==3.0.3
+mss==9.0.1
 numpy==2.4.5
 opencv-python==4.13.0.92
 packaging==26.2
+pillow==11.4.0
 psycopg2-binary==2.9.12
+pygetwindow==0.6
 python-dateutil==2.9.0.post0
 python-dotenv==1.0.1
+pywin32==307
 Werkzeug==3.1.8
