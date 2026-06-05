@@ -43,8 +43,10 @@ body{
   font-family:'Fira Sans',sans-serif;
   background:var(--bg);
   color:var(--text);
-  min-height:100dvh;
-  overflow-x:hidden;
+  height:100dvh;
+  overflow:hidden;
+  display:flex;
+  flex-direction:column;
 }
 
 /* ============================
@@ -199,17 +201,19 @@ body{
   display:flex;
   flex-direction:column;
   gap:12px;
-  padding:0 16px 80px;
+  padding:0 16px;
+  flex:1;
+  min-height:0;
 }
 @media(min-width:900px){
   .main{
     flex-direction:row;
     align-items:stretch;
-    padding:0 20px 20px;
+    padding:0 20px;
   }
 }
 @media(min-width:1200px){
-  .main{padding:0 24px 24px}
+  .main{padding:0 24px}
 }
 
 /* ============================
@@ -218,6 +222,8 @@ body{
 .camera-section{
   width:100%;
   display:flex;flex-direction:column;gap:10px;
+  flex:1;
+  min-height:0;
 }
 @media(min-width:900px){
   .camera-section{flex:2;min-width:0}
@@ -229,6 +235,10 @@ body{
   border-radius:var(--radius-lg);
   overflow:hidden;
   position:relative;
+  display:flex;
+  flex-direction:column;
+  flex:1;
+  min-height:0;
 }
 
 /* Motion alert banner */
@@ -253,9 +263,12 @@ body{
 
 .camera-feed-wrap{
   position:relative;
-  aspect-ratio:16/9;
+  flex:1;
   background:#000;
   overflow:hidden;
+  display:flex;
+  align-items:center;
+  justify-content:center;
 }
 .camera-feed{
   width:100%;height:100%;
