@@ -390,21 +390,28 @@ def get_failed_login_attempts(ip_address, minutes=60):
     time_str = time_limit.isoformat()
     
     if DB_TYPE == "sqlite":
+        # SQLite: convert to string format that SQLite understands (YYYY-MM-DD HH:MM:SS)
+        time_str_sqlite = time_limit.strftime("%Y-%m-%d %H:%M:%S")
         query = """
             SELECT COUNT(*) FROM failed_login_attempts
             WHERE ip_address = ? 
             AND attempted_at > ?
         """
-        result = execute_query(query, (ip_address, time_str), fetch=True)
+        result = execute_query(query, (ip_address, time_str_sqlite), fetch=True)
+        count = result[0][0] if result else 0
+        logger.info(f"SQLite query: IP {ip_address}, time_limit={time_str_sqlite}, count={count}")
+        return count
     else:
+        # PostgreSQL: use ISO format
         query = """
             SELECT COUNT(*) FROM failed_login_attempts
             WHERE ip_address = %s 
             AND attempted_at > %s
         """
         result = execute_query(query, (ip_address, time_str), fetch=True)
-    
-    return result[0][0] if result else 0
+        count = result[0][0] if result else 0
+        logger.info(f"PostgreSQL query: IP {ip_address}, time_limit={time_str}, count={count}")
+        return count
 
 def log(query, values):
     """Generic logging function for backward compatibility"""

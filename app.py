@@ -363,16 +363,25 @@ def login():
 
         # Password is wrong - log failed attempt SYNCHRONOUSLY so it's counted immediately
         try:
-            db.log_failed_login(username, ip, user_agent)
-            print(f"✓ Failed login logged: {username} from {ip}")
+            result = db.log_failed_login(username, ip, user_agent)
+            print(f"✓ Failed login logged: {username} from {ip} - Result: {result}")
         except Exception as e:
-            print(f"Error logging failed attempt: {e}")
+            print(f"❌ ERROR logging failed attempt: {e}")
+            import traceback
+            traceback.print_exc()
         
         # Also log to auth logs asynchronously
         _log_auth(username, 'LOGIN_FAILED', 'Invalid credentials', ip, user_agent)
         
-        # Get current failure count for THIS IP
-        current_failures = db.get_failed_login_attempts(ip, minutes=10)
+        # Get current failure count for THIS IP - FORCE FRESH COUNT
+        try:
+            current_failures = db.get_failed_login_attempts(ip, minutes=10)
+            print(f"DEBUG: IP {ip} has {current_failures} failed attempts in last 10 minutes")
+        except Exception as e:
+            print(f"❌ ERROR getting failure count: {e}")
+            current_failures = 0
+            import traceback
+            traceback.print_exc()
         
         # If they've hit 5 failures, block them
         if current_failures >= 5:
@@ -380,6 +389,7 @@ def login():
             minutes = remaining // 60
             seconds = remaining % 60
             error_msg = f"🚫 Too many failed login attempts. Your IP is blocked for {minutes}m {seconds}s."
+            print(f"🚫 IP BLOCKED: {ip} after {current_failures} attempts")
             return _render_login(error_msg)
         
         # Show how many attempts remain before lockout
@@ -389,6 +399,7 @@ def login():
         else:
             error_msg = f"❌ Invalid username or password. ({attempts_remaining} attempts remaining)"
         
+        print(f"DEBUG: Showing {attempts_remaining} attempts remaining to user")
         return _render_login(error_msg, attempts_remaining)
 
     return _render_login()
@@ -870,6 +881,40 @@ def system_status():
 @app.route('/health')
 def health():
     return jsonify({"status": "ok"})
+
+# =========================
+# DEBUG: Check failed login attempts
+# =========================
+@app.route('/debug/failed-logins/<ip_addr>')
+def debug_failed_logins(ip_addr):
+    """Debug endpoint to check failed login count for an IP"""
+    try:
+        count = db.get_failed_login_attempts(ip_addr, minutes=10)
+        
+        # Also fetch raw data to verify records exist
+        query = """
+            SELECT ip_address, attempted_at, username FROM failed_login_attempts
+            WHERE ip_address = %s
+            ORDER BY attempted_at DESC
+            LIMIT 10
+        """
+        result = db.execute_query(query, (ip_addr,), fetch=True)
+        
+        return jsonify({
+            "ip": ip_addr,
+            "failed_attempts_last_10min": count,
+            "recent_attempts": [
+                {
+                    "ip": r[0],
+                    "timestamp": str(r[1]),
+                    "username": r[2]
+                }
+                for r in (result or [])
+            ]
+        })
+    except Exception as e:
+        return jsonify({"error": str(e), "ip": ip_addr})
+
 
 # =========================
 # RUN APP
