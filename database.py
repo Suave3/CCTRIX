@@ -175,13 +175,21 @@ else:  # PostgreSQL
 def init_db():
     """Initialize database tables"""
     conn = None
+    cur = None
     try:
-        conn = get_connection()
-        if not conn:
+        result = get_connection()
+        
+        # Handle both SQLite (returns tuple) and PostgreSQL (returns connection)
+        if isinstance(result, tuple):
+            conn, cur = result
+        else:
+            conn = result
+            if conn:
+                cur = conn.cursor()
+        
+        if not conn or not cur:
             logger.error("Cannot initialize database - no connection")
             return False
-        
-        cur = conn.cursor()
         
         if DB_TYPE == "sqlite":
             # SQLite syntax
