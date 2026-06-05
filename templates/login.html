@@ -387,6 +387,15 @@ input::placeholder{color:#475569}
     </div>
     {% endif %}
 
+    {% if attempts_remaining is not none %}
+    <div style="background:rgba(59,130,246,.15);border:1px solid rgba(59,130,246,.3);border-radius:10px;padding:12px 14px;margin-bottom:18px;display:flex;align-items:center;gap:10px;font-size:13px;color:#93c5fd;">
+      <svg width="15" height="15" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" style="flex-shrink:0">
+        <path stroke-linecap="round" stroke-linejoin="round" d="M12 6v6h4.5m4.5-10.5a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z"/>
+      </svg>
+      <span>⏱️ <strong>{{ attempts_remaining }} of 5</strong> attempts remaining before 10-minute lockout</span>
+    </div>
+    {% endif %}
+
     <form method="POST" id="login-form" novalidate>
 
       <div class="form-group">

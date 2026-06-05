@@ -217,27 +217,47 @@ logger_thread = threading.Thread(target=_async_db_logger, daemon=True)
 logger_thread.start()
 
 # =========================
-# LOGIN CHECK
+# LOGIN CHECK - BRUTE FORCE PROTECTION
 # =========================
 def is_ip_blocked(ip):
-    """Check if an IP is blocked due to too many failed login attempts"""
+    """
+    Check if an IP is blocked due to too many failed login attempts.
+    Policy: Block after 5 failed attempts within 10 minutes.
+    """
+    try:
+        count = db.get_failed_login_attempts(ip, minutes=10)
+        if count >= 5:
+            print(f"🚫 IP BLOCKED: {ip} has {count} failed attempts in last 10 minutes")
+            return True
+        return False
+    except Exception as e:
+        print(f"IP block check error: {e}")
+        return False
+
+def get_ip_block_time_remaining(ip):
+    """
+    Get remaining block time for an IP in seconds.
+    Returns 0 if not blocked.
+    """
     try:
         from datetime import datetime, timedelta
-        time_limit = datetime.now() - timedelta(minutes=1)
-        
-        # Count failed login attempts in the last minute
+        # Check most recent failed attempt
         query = """
-            SELECT COUNT(*)
-            FROM failed_login_attempts
+            SELECT MAX(attempted_at) FROM failed_login_attempts
             WHERE ip_address = %s
-            AND attempted_at >= %s
         """
-        result = db.execute_query(query, (ip, time_limit), fetch=True)
-        count = result[0][0] if result else 0
-        return count >= 3
+        result = db.execute_query(query, (ip,), fetch=True)
+        if result and result[0][0]:
+            last_attempt = result[0][0]
+            if isinstance(last_attempt, str):
+                last_attempt = datetime.fromisoformat(last_attempt)
+            block_end = last_attempt + timedelta(minutes=10)
+            remaining = (block_end - datetime.now()).total_seconds()
+            return max(0, int(remaining))
+        return 0
     except Exception as e:
-        print("IP block check error:", e)
-        return False
+        print(f"Block time calculation error: {e}")
+        return 0
 
 # =========================
 # RECAPTCHA VERIFIER
@@ -299,13 +319,18 @@ def login():
     ip = request.remote_addr
     user_agent = request.headers.get('User-Agent')
 
-    def _render_login(error=None):
-        return render_template("login.html", error=error, site_key=RECAPTCHA_SITE_KEY)
+    def _render_login(error=None, attempts_remaining=None):
+        return render_template("login.html", error=error, site_key=RECAPTCHA_SITE_KEY, attempts_remaining=attempts_remaining)
 
     if request.method == 'POST':
 
+        # Check if IP is already blocked
         if is_ip_blocked(ip):
-            return _render_login("Too many failed attempts. Your IP is blocked for 1 minute.")
+            remaining = get_ip_block_time_remaining(ip)
+            minutes = remaining // 60
+            seconds = remaining % 60
+            error_msg = f"🚫 Too many failed login attempts. Your IP is blocked for {minutes}m {seconds}s."
+            return _render_login(error_msg)
 
         # reCAPTCHA check
         recaptcha_token = request.form.get('g-recaptcha-response', '')
@@ -336,13 +361,35 @@ def login():
             _log_auth(username, 'LOGIN_SUCCESS', 'Valid credentials', ip, user_agent)
             return redirect(url_for('index'))
 
-        # Log failed login (async)
+        # Password is wrong - log failed attempt SYNCHRONOUSLY so it's counted immediately
         try:
-            db_log_queue.put_nowait(('failed_login', (username, ip, user_agent)))
-        except:
-            print(f"Failed login log queue full for {username}")
+            db.log_failed_login(username, ip, user_agent)
+            print(f"✓ Failed login logged: {username} from {ip}")
+        except Exception as e:
+            print(f"Error logging failed attempt: {e}")
+        
+        # Also log to auth logs asynchronously
         _log_auth(username, 'LOGIN_FAILED', 'Invalid credentials', ip, user_agent)
-        return _render_login("Invalid username or password.")
+        
+        # Get current failure count for THIS IP
+        current_failures = db.get_failed_login_attempts(ip, minutes=10)
+        
+        # If they've hit 5 failures, block them
+        if current_failures >= 5:
+            remaining = get_ip_block_time_remaining(ip)
+            minutes = remaining // 60
+            seconds = remaining % 60
+            error_msg = f"🚫 Too many failed login attempts. Your IP is blocked for {minutes}m {seconds}s."
+            return _render_login(error_msg)
+        
+        # Show how many attempts remain before lockout
+        attempts_remaining = 5 - current_failures
+        if attempts_remaining == 1:
+            error_msg = "❌ Invalid username or password. ⚠️ ONE ATTEMPT REMAINING before 10-minute lockout!"
+        else:
+            error_msg = f"❌ Invalid username or password. ({attempts_remaining} attempts remaining)"
+        
+        return _render_login(error_msg, attempts_remaining)
 
     return _render_login()
 
