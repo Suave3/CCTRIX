@@ -617,7 +617,8 @@ body{
   </a>
 </header>
 
-<!-- STATS BAR -->
+<!-- STATS BAR (admin only) -->
+{% if role == 'admin' %}
 <div class="stats-bar" role="region" aria-label="System statistics">
   <div class="stat-card">
     <div class="stat-icon green" aria-hidden="true">
@@ -671,6 +672,7 @@ body{
     </div>
   </div>
 </div>
+{% endif %}
 
 <!-- MAIN CONTENT -->
 <main class="main" role="main">
@@ -708,7 +710,8 @@ body{
     </div>
   </section>
 
-  <!-- LOGS SECTION -->
+  <!-- LOGS SECTION (admin only) -->
+  {% if role == 'admin' %}
   <section class="logs-section" aria-label="Activity logs">
     <div class="logs-card">
 
@@ -755,10 +758,12 @@ body{
 
     </div>
   </section>
+  {% endif %}
 
 </main>
 
-<!-- MOBILE BOTTOM NAV (desktop hidden via CSS) -->
+<!-- MOBILE BOTTOM NAV (admin only) -->
+{% if role == 'admin' %}
 <nav class="mobile-fab-area" aria-label="Mobile navigation">
   <button class="fab-btn active" id="fab-motion" onclick="switchTab('motion', null, 'fab-motion')" aria-label="Motion logs">
     <svg fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" aria-hidden="true">
@@ -781,6 +786,7 @@ body{
   </a>
   {% endif %}
 </nav>
+{% endif %}
 
 <!-- TOAST CONTAINER -->
 <div class="toast-wrap" id="toast-wrap" aria-live="polite" aria-atomic="false"></div>
