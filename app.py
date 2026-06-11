@@ -12,7 +12,7 @@ import psycopg2
 from dotenv import load_dotenv
 from PIL import Image
 import database as db
-import threading
+import threading as threading_module
 from queue import Queue
 
 # Optional imports for GUI/camera functionality (may not be available in cloud)
@@ -32,8 +32,8 @@ app.static_url_path = "/static"
 
 # reCAPTCHA v2 — uses Google's official test keys by default for local development.
 # Replace with real keys from https://www.google.com/recaptcha/admin in production.
-RECAPTCHA_SITE_KEY   = os.environ.get("RECAPTCHA_SITE_KEY",   "6LdL4AgtAAAAACyhJQgVnU9kd4xzYfeAz-EYk9IU")
-RECAPTCHA_SECRET_KEY = os.environ.get("RECAPTCHA_SECRET_KEY", "6LdL4AgtAAAAAJmX-CHFzJQBtG4-V7DAvK17yUMM")
+RECAPTCHA_SITE_KEY   = os.environ.get("RECAPTCHA_SITE_KEY",   "6LfrtQgtAAAAAKMSI7t2cyk9KDRiMd0lVEtf7ceJ")
+RECAPTCHA_SECRET_KEY = os.environ.get("RECAPTCHA_SECRET_KEY", "6LfrtQgtAAAAADm5TxMPkeSiMBf6HIl8finN69Ak")
 
 # =========================
 # DATABASE CONNECTION & INITIALIZATION
@@ -63,36 +63,41 @@ print(f"Logs directory: {LOGS_DIR}")
 
 camera = None
 
+# Frame buffer for threaded reading (VLC-style)
+frame_buffer = Queue(maxsize=2)  # Keep only latest 2 frames
+camera_reading_thread = None
+camera_thread_stop = False
+
 # =========================
-# CAMERA SOURCE: OBS Virtual Camera
+# CAMERA SOURCE: RTSP or Local Device
 # =========================
 # 
 # WORKFLOW:
-# OBS Window Capture (in OBS app)
-#        ↓
-# OBS Virtual Camera output (enable in Tools > Start Virtual Camera)
-#        ↓
-# OpenCV (cv2.VideoCapture) reads virtual camera as device 0
-#        ↓
-# Flask video_feed streams to Dashboard
-#
-# BENEFITS:
-# - OBS window can be minimized
-# - Clean separation: OBS app handles capture, app handles streaming
-# - Works even when OBS is not active
+# 1. Try to connect to RTSP camera (network stream)
+# 2. If RTSP fails, fall back to local device camera (e.g., webcam)
+# 3. If both fail, run in headless mode (no camera)
 #
 # SETUP:
-# 1. Enable OBS Virtual Camera (Tools > Start Virtual Camera)
-# 2. App detects it automatically as device 0
-# 3. Done! Stream will show OBS output
+# Use CAMERA_SOURCE=rtsp://... for RTSP network streams (primary)
+# Use CAMERA_SOURCE=0 for local webcam/device camera (fallback)
 
-# OBS Virtual Camera is the default (device 0).
-# Use CAMERA_SOURCE=0 for OBS Virtual Camera (recommended)
-# Use CAMERA_SOURCE=1 for a different camera device
-# Use CAMERA_SOURCE=rtsp://... for RTSP network streams
 CAMERA_SOURCE = os.environ.get("CAMERA_SOURCE", "0").strip()
+FALLBACK_DEVICE = "0"  # Fallback to device 0 if RTSP fails
 
-# OpenCV reads from OBS Virtual Camera (numeric source) or RTSP streams
+# Common RTSP stream paths to try as fallbacks
+RTSP_FALLBACK_PATHS = [
+    "/stream1",      # Original
+    "/stream",
+    "/ch0",
+    "/ch1", 
+    "/main",
+    "/live",
+    "/live/ch0",
+    "/media/video1",
+    "/h264/ch0/av_stream",
+]
+
+# OpenCV reads from RTSP streams or local device cameras
 def _open_camera(source):
     # Skip camera if cv2 is not available (e.g., on Railway cloud)
     if cv2 is None:
@@ -100,80 +105,139 @@ def _open_camera(source):
         return None
     
     try:
-        
+        # Check if source is a local device (numeric) or network stream (RTSP)
         if source.isdigit():
-            print(f"🎥 Attempting to open OBS Virtual Camera (device {source})...")
+            # Local device camera
+            print(f"🎥 Attempting to open local device camera (device {source})...")
             backends = [getattr(cv2, 'CAP_DSHOW', None), getattr(cv2, 'CAP_MSMF', None), getattr(cv2, 'CAP_ANY', None)]
             for backend in backends:
                 if backend is None:
                     continue
                 cam = cv2.VideoCapture(int(source), backend)
                 if cam is not None and cam.isOpened():
-                    print(f"✓ OBS Virtual Camera opened successfully (device {source}) with backend {backend}")
+                    print(f"✓ Local device camera opened successfully (device {source}) with backend {backend}")
                     return cam
                 if cam is not None:
                     cam.release()
-            print(f"✗ Failed to open OBS Virtual Camera (device {source}). Make sure Virtual Camera is enabled in OBS (Tools > Start Virtual Camera)")
+            print(f"✗ Failed to open local device camera (device {source})")
             return None
 
         # For network streams (RTSP/HTTP)
-        backends = []
-        if hasattr(cv2, 'CAP_GSTREAMER'):
-            backends.append(cv2.CAP_GSTREAMER)
-        if hasattr(cv2, 'CAP_FFMPEG'):
-            backends.append(cv2.CAP_FFMPEG)
-        backends.append(getattr(cv2, 'CAP_ANY', None))
-
-        for backend in backends:
-            if backend is None:
-                continue
-            print(f"Trying backend {backend} for {source}")
-            cam = cv2.VideoCapture(source, backend)
-            if cam is None:
-                continue
+        print(f"🎥 Attempting to connect to RTSP stream: {source}")
+        
+        # Extract base URL for fallback attempts
+        is_rtsp = source.startswith("rtsp://") or source.startswith("http://")
+        if is_rtsp and "@" in source:
+            # Extract protocol and credentials
+            base_url = source[:source.rfind("/")]
             
-            # Set optimized properties for network streams
-            if hasattr(cam, 'set'):
-                try:
-                    cam.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-                    cam.set(cv2.CAP_PROP_AUTOFOCUS, 0)
-                except Exception:
-                    pass
+            # Try original path first, then fallback paths
+            urls_to_try = [source]
+            
+            # Add fallback paths by replacing the stream path
+            for fallback_path in RTSP_FALLBACK_PATHS:
+                fallback_url = base_url + fallback_path
+                if fallback_url not in urls_to_try:
+                    urls_to_try.append(fallback_url)
+        else:
+            urls_to_try = [source]
+        
+        # Try each URL
+        for attempt_url in urls_to_try:
+            if attempt_url != urls_to_try[0]:  # Not the primary URL
+                print(f"  Trying fallback path: {attempt_url.split('/')[-1] or '/'}")
+            
+            backends = []
+            if hasattr(cv2, 'CAP_FFMPEG'):
+                backends.append(('FFMPEG', cv2.CAP_FFMPEG))
+            if hasattr(cv2, 'CAP_GSTREAMER'):
+                backends.append(('GSTREAMER', cv2.CAP_GSTREAMER))
+            backends.append(('DEFAULT', getattr(cv2, 'CAP_ANY', None)))
+
+            for backend_name, backend in backends:
+                if backend is None:
+                    continue
                 
-                # Shorter timeout for network streams (5 seconds instead of 30)
-                if hasattr(cv2, 'CAP_PROP_OPEN_TIMEOUT_MSEC'):
+                cam = cv2.VideoCapture(attempt_url, backend)
+                if cam is None:
+                    continue
+                
+                # Set optimized properties for network streams (RTSP)
+                if hasattr(cam, 'set'):
                     try:
-                        cam.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 5000)
+                        cam.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # Minimize buffer for low latency
                     except Exception:
                         pass
-            
-            # Wait a bit for connection to establish
-            time.sleep(2)
-            
-            if cam.isOpened():
-                # Try to read a frame to verify connection
-                ret, frame = cam.read()
-                if ret and frame is not None and frame.size > 0:
-                    print(f"✓ Camera opened successfully: {source} with backend {backend}")
-                    return cam
+                    try:
+                        if hasattr(cv2, 'CAP_PROP_OPEN_TIMEOUT_MSEC'):
+                            cam.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 30000)
+                    except Exception:
+                        pass
+                    try:
+                        cam.set(cv2.CAP_PROP_FPS, 30)  # Request 30 FPS
+                    except Exception:
+                        pass
+                    try:
+                        cam.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+                        cam.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+                    except Exception:
+                        pass
+                    # Drop frames if buffer is full (prevents lag)
+                    try:
+                        cam.set(cv2.CAP_PROP_AUTOFOCUS, 0)
+                    except Exception:
+                        pass
+                
+                # Wait for connection to establish
+                time.sleep(2)
+                
+                if cam.isOpened():
+                    print(f"    {backend_name}: Connection established, testing frame read...")
+                    # Try to read a frame to verify connection
+                    success = False
+                    for attempt in range(3):  # Try 3 times to read a frame
+                        ret, frame = cam.read()
+                        if ret and frame is not None and frame.size > 0:
+                            print(f"✓ RTSP camera connected successfully!")
+                            print(f"  URL: {attempt_url}")
+                            print(f"  Backend: {backend_name}")
+                            success = True
+                            break
+                        if attempt < 2:
+                            time.sleep(1)
+                    
+                    if success:
+                        return cam
+                    else:
+                        cam.release()
                 else:
                     cam.release()
-                    print(f"Camera open with backend {backend} but failed to read frame from: {source}")
-            else:
-                cam.release()
-                print(f"Camera failed to open with backend {backend}: {source}")
 
-        print(f"All backends failed for: {source}")
+        print(f"✗ All connection methods failed for RTSP: {source}")
+        print("   Possible causes:")
+        print("   - Camera is offline or not accessible")
+        print("   - RTSP credentials are incorrect")
+        print("   - Stream path is wrong")
+        print("   - Port 554 is blocked by firewall")
         return None
+        
     except Exception as e:
-        print("CAMERA OPEN ERROR:", e)
+        print(f"CAMERA OPEN ERROR: {e}")
+        import traceback
+        traceback.print_exc()
         return None
 
 if CAMERA_SOURCE:
     print(f"Attempting camera source: {CAMERA_SOURCE}")
     camera = _open_camera(CAMERA_SOURCE)
+    
+    # Fallback to local device if RTSP or primary source fails
+    if camera is None and not CAMERA_SOURCE.isdigit():
+        print(f"⚠️  Primary source failed. Falling back to local device camera (device {FALLBACK_DEVICE})...")
+        camera = _open_camera(FALLBACK_DEVICE)
+    
     if camera is None:
-        print("CAMERA ERROR: Unable to open camera source:", CAMERA_SOURCE)
+        print("⚠️  CAMERA ERROR: Unable to open camera source - running in headless mode")
 
 previous_frame = None
 motion_active = False
@@ -185,6 +249,52 @@ current_timestamp = ""  # Store timestamp for all frames
 current_status = "NO MOTION DETECTED"  # Store status for all frames
 current_status_color = (255, 255, 255)  # Store status color for all frames
 last_rects = []  # Store motion rectangles for display on skipped frames
+
+# =========================
+# DEDICATED CAMERA READING THREAD (VLC-STYLE)
+# =========================
+def _camera_reader_thread():
+    """Continuously read frames from camera without blocking (like VLC)"""
+    global camera_thread_stop, frame_buffer
+    
+    if camera is None:
+        return
+    
+    print("📹 Camera reader thread started")
+    
+    while not camera_thread_stop:
+        try:
+            ret, frame = camera.read()
+            
+            if not ret or frame is None:
+                # Connection lost, try to reconnect
+                print("⚠️  Camera frame read failed - waiting...")
+                time.sleep(0.5)
+                continue
+            
+            # Drop old frames if buffer is full (prevent lag buildup like VLC does)
+            try:
+                frame_buffer.put_nowait(frame)
+            except:
+                # Buffer full - drop oldest frame and add new one
+                try:
+                    frame_buffer.get_nowait()
+                    frame_buffer.put_nowait(frame)
+                except:
+                    pass
+            
+        except Exception as e:
+            print(f"Camera reader error: {e}")
+            time.sleep(0.1)
+    
+    print("📹 Camera reader thread stopped")
+
+# Start camera reader thread if camera is available
+if camera is not None:
+    camera_thread_stop = False
+    camera_reading_thread = threading_module.Thread(target=_camera_reader_thread, daemon=True)
+    camera_reading_thread.start()
+    print("✓ Frame reader thread started")
 
 # =========================
 # ASYNC DATABASE LOGGING
@@ -213,7 +323,7 @@ def _async_db_logger():
             pass
 
 # Start async logger thread
-logger_thread = threading.Thread(target=_async_db_logger, daemon=True)
+logger_thread = threading_module.Thread(target=_async_db_logger, daemon=True)
 logger_thread.start()
 
 # =========================
@@ -495,160 +605,151 @@ def generate_frames():
             time.sleep(0.1)
         return
 
-    # ===== OPTIMIZATION PARAMETERS =====
-    FRAME_SKIP = 1  # Process every frame for maximum accuracy
-    BLUR_KERNEL = 5  # Smaller kernel for faster processing and better edge detection
-    MIN_CONTOUR_AREA = 800  # Minimum area to reduce noise and false positives (green squares)
-    MOTION_THRESHOLD = 15  # Lower threshold for higher sensitivity
-    JPEG_QUALITY = 50  # JPEG compression quality (0-100, lower = faster and smaller files)
-    MAX_FPS = 30  # Limit output to 30 fps for responsive display
+    # ===== ULTRA-AGGRESSIVE OPTIMIZATION PARAMETERS =====
+    FRAME_SKIP = 8  # Process every 8th frame (87.5% reduction in detection processing)
+    DISPLAY_WIDTH, DISPLAY_HEIGHT = 480, 270  # Ultra-low resolution for lightning-fast encoding
+    BLUR_KERNEL = 3  # Minimal blur
+    MIN_CONTOUR_AREA = 1200  # Very high threshold reduces false positives
+    MOTION_THRESHOLD = 30  # High threshold = less noise
+    JPEG_QUALITY = 15  # Ultra-compressed JPEG (maximum speed)
+    MAX_FPS = 20  # Reduce to 20 fps for network efficiency
     FRAME_TIME = 1.0 / MAX_FPS  # Time between frames
     
     frame_count = 0
     last_frame_time = time.time()
+    cached_display = None  # Cache the last encoded frame
 
     while True:
         try:
-            success, frame = camera.read()
-
-            if not success:
-                time.sleep(0.01)
-                continue
-
-            frame_count += 1
-            
-            # SKIP FRAMES: Only process every Nth frame
-            if frame_count % FRAME_SKIP != 0:
-                # Still encode and send, but skip detection processing
-                display = cv2.flip(frame, 1)
-                display = cv2.resize(display, (800, 500))
-                
-                # Add stored overlays to skipped frames for smooth display
-                # Draw motion rectangles from last detection
-                for rect in last_rects:
-                    x, y, w, h = rect
-                    cv2.rectangle(display, (x, y), (x + w, y + h), (0, 255, 0), 2)
-                
-                # Add current status and timestamp to maintain continuous display
-                if current_status:
-                    cv2.putText(display, current_status, (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.9, current_status_color, 2)
-                if current_timestamp:
-                    cv2.putText(display, current_timestamp, (20, 480), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-                
-                ret, buffer = cv2.imencode('.jpg', display, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
+            # Non-blocking read from frame buffer (VLC-style threaded reading)
+            try:
+                frame = frame_buffer.get(timeout=0.5)  # 500ms timeout
+            except:
+                # No frame available - show waiting message
+                blank = np.ones((DISPLAY_HEIGHT, DISPLAY_WIDTH, 3), dtype=np.uint8) * 50
+                cv2.putText(blank, "Waiting for stream...", (80, 135), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+                ret, buffer = cv2.imencode('.jpg', blank, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
                 if ret:
-                    frame_bytes = buffer.tobytes()
                     yield (
                         b'--frame\r\n'
                         b'Content-Type: image/jpeg\r\n\r\n'
-                        + frame_bytes +
+                        + buffer.tobytes() +
+                        b'\r\n'
+                    )
+                time.sleep(0.1)
+                continue
+
+            frame_count += 1
+            # SKIP FRAMES: Only process every Nth frame
+            if frame_count % FRAME_SKIP != 0:
+                # For skipped frames, reuse cached encoded frame (zero processing)
+                if cached_display:
+                    yield (
+                        b'--frame\r\n'
+                        b'Content-Type: image/jpeg\r\n\r\n'
+                        + cached_display +
                         b'\r\n'
                     )
                 continue
 
             # === DETECTION PROCESSING (runs every FRAME_SKIP frames) ===
             frame = cv2.flip(frame, 1)
-            frame = cv2.resize(frame, (800, 500))
+            frame = cv2.resize(frame, (DISPLAY_WIDTH, DISPLAY_HEIGHT))
             display = frame.copy()
             clean = frame.copy()
 
             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-            # OPTIMIZATION: Smaller blur kernel for faster processing
-            gray = cv2.GaussianBlur(gray, (BLUR_KERNEL, BLUR_KERNEL), 0)
-
+            # Skip blur entirely for max speed - threshold is sufficient
+            
             if previous_frame is None:
                 previous_frame = gray
-                # Still yield frame even if first frame
-                current_timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                current_status = "Initializing..."
-                current_status_color = (255, 255, 255)
-                cv2.putText(display, current_status, (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.9, current_status_color, 2)
-                cv2.putText(display, current_timestamp, (20, 480), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                # Minimal text rendering for first frame
+                current_timestamp = datetime.now().strftime("%H:%M:%S")
+                current_status = "INIT"
+                cv2.putText(display, f"[{current_status}]", (8, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
+                cv2.putText(display, current_timestamp, (8, 265), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (0, 255, 0), 1)
                 ret, buffer = cv2.imencode('.jpg', display, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
                 if ret:
-                    frame_bytes = buffer.tobytes()
+                    cached_display = buffer.tobytes()
                     yield (
                         b'--frame\r\n'
                         b'Content-Type: image/jpeg\r\n\r\n'
-                        + frame_bytes +
+                        + cached_display +
                         b'\r\n'
                     )
                 continue
 
             diff = cv2.absdiff(previous_frame, gray)
             thresh = cv2.threshold(diff, MOTION_THRESHOLD, 255, cv2.THRESH_BINARY)[1]
-            # Better morphological operations for accurate motion detection
-            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-            thresh = cv2.dilate(thresh, kernel, iterations=2)
-            thresh = cv2.erode(thresh, kernel, iterations=1)  # Clean up noise
-            # Additional dilation for better edge connectivity
-            thresh = cv2.dilate(thresh, kernel, iterations=1)
-
-            contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            
+            # ULTRA-MINIMAL: No morphological operations - direct threshold
+            contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
 
             motion = False
             last_rects = []  # Reset rectangles for this frame
+            
             for c in contours:
                 area = cv2.contourArea(c)
-                # Detect any motion above minimum threshold
                 if area < MIN_CONTOUR_AREA:
                     continue
                 
-                # Filter out very elongated or thin contours (noise)
                 x, y, w, h = cv2.boundingRect(c)
-                aspect_ratio = float(w) / h if h > 0 else 0
-                if aspect_ratio > 10 or aspect_ratio < 0.1:  # Skip extreme shapes
+                
+                # Quick filter: skip if too small
+                if w < 30 or h < 30:
                     continue
                     
                 motion = True
-                last_rects.append((x, y, w, h))  # Store rectangle for display on skipped frames
-                cv2.rectangle(display, (x, y), (x + w, y + h), (0, 255, 0), 2)
+                last_rects.append((x, y, w, h))
+                cv2.rectangle(display, (x, y), (x + w, y + h), (0, 255, 0), 1)
+                break  # Only draw first contour to save time
 
             previous_frame = gray
             now = time.time()
-            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
             if motion:
                 last_motion_time = now
                 stable_motion_state = True
 
-                # Log detection every 1 second of continuous motion (infinite logging)
-                if (now - last_detection_log_time) > 1.0:
+                # Log detection every 3 seconds to reduce I/O
+                if (now - last_detection_log_time) > 3.0:
                     last_detection_log_time = now
-                    # Use milliseconds to ensure unique filename even for rapid detections
                     filename = f"{int(now * 1000)}.jpg"
                     path = os.path.join(LOGS_DIR, filename)
-                    # Save image SYNCHRONOUSLY to ensure file exists before logging
-                    try:
-                        cv2.imwrite(path, clean, [cv2.IMWRITE_JPEG_QUALITY, 50])
-                    except Exception as e:
-                        print(f"Error saving detection image: {e}")
                     image_path = f"/static/logs/{filename}"
                     
-                    # OPTIMIZATION: Queue logging instead of blocking
-                    try:
-                        db_log_queue.put_nowait(('detection', (True, 0.90, image_path)))
-                    except:
-                        print("DB log queue full, skipping detection log")
+                    def save_image_async():
+                        try:
+                            cv2.imwrite(path, clean, [cv2.IMWRITE_JPEG_QUALITY, 20])
+                            try:
+                                db_log_queue.put_nowait(('detection', (True, 0.90, image_path)))
+                            except:
+                                pass
+                        except:
+                            pass
+                    
+                    save_thread = threading_module.Thread(target=save_image_async, daemon=True)
+                    save_thread.start()
 
-            # Stable motion state: set to False only after 3 seconds without motion for faster clearing
-            if now - last_motion_time > 3:
+            # Stable motion state: clear after 1 second
+            if now - last_motion_time > 1:
                 stable_motion_state = False
-                last_rects = []  # Clear rectangles when motion ends
+                last_rects = []
 
-            # Update global status and timestamp for display on all frames
-            current_status = "MOTION DETECTED" if stable_motion_state else "NO MOTION DETECTED"
+            # Minimal text display
+            current_status = "MOTION" if stable_motion_state else "IDLE"
             current_status_color = (0, 0, 255) if stable_motion_state else (255, 255, 255)
-            current_timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            current_timestamp = datetime.now().strftime("%H:%M:%S")
 
-            cv2.putText(display, current_status, (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.9, current_status_color, 2)
-            cv2.putText(display, current_timestamp, (20, 480), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+            cv2.putText(display, f"[{current_status}]", (8, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.4, current_status_color, 1)
+            cv2.putText(display, current_timestamp, (8, 265), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (0, 255, 0), 1)
 
-            # OPTIMIZATION: Reduced JPEG quality for faster encoding
+            # Ultra-aggressive JPEG encoding
             ret, buffer = cv2.imencode('.jpg', display, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
 
             if ret:
                 frame_bytes = buffer.tobytes()
+                cached_display = frame_bytes
                 yield (
                     b'--frame\r\n'
                     b'Content-Type: image/jpeg\r\n\r\n'
@@ -656,7 +757,7 @@ def generate_frames():
                     b'\r\n'
                 )
             
-            # OPTIMIZATION: Frame rate limiting to avoid overwhelming clients
+            # Strict frame rate limiting
             elapsed = time.time() - last_frame_time
             if elapsed < FRAME_TIME:
                 time.sleep(FRAME_TIME - elapsed)
