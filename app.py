@@ -609,14 +609,44 @@ def generate_frames():
             time.sleep(0.1)
         return
 
-    # Railway mode - no camera
+    # Railway mode - no camera, but simulate motion events for demo
     if camera is None:
-        print("⚠️  HEADLESS MODE: No camera available (expected in Railway cloud)")
+        print("⚠️  HEADLESS MODE: No camera available (Railway cloud) - Generating test motion events for demo")
+        
+        import random
+        demo_event_counter = 0
+        demo_last_event = time.time()
+        demo_motion_active = False
+        
         while True:
+            # Simulate motion events every 15-30 seconds for demo purposes
+            current_time = time.time()
+            if current_time - demo_last_event > random.randint(15, 30):
+                demo_motion_active = not demo_motion_active
+                demo_last_event = current_time
+                
+                if demo_motion_active:
+                    # Log a motion detection event (simulated)
+                    try:
+                        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        print(f"🎬 DEMO: Simulated motion detected at {timestamp}")
+                        db_log_queue.put_nowait(('detection', ('DEMO', timestamp, 'test_snapshot.jpg', 1)))
+                        demo_event_counter += 1
+                    except Exception as e:
+                        print(f"Demo logging error: {e}")
+            
+            # Display message with event count
             blank = np.ones((500, 800, 3), dtype=np.uint8) * 50
             cv2.putText(blank, "Railway Cloud Mode", (120, 150), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 165, 255), 2)
             cv2.putText(blank, "No Camera Connected", (80, 250), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
             cv2.putText(blank, "Logs are still recording", (70, 350), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 1)
+            
+            # Show demo event status
+            status_text = "TEST EVENTS ACTIVE" if demo_motion_active else "TEST READY"
+            status_color = (0, 255, 0) if demo_motion_active else (100, 100, 100)
+            cv2.putText(blank, status_text, (200, 430), cv2.FONT_HERSHEY_SIMPLEX, 0.6, status_color, 1)
+            cv2.putText(blank, f"Events: {demo_event_counter}", (300, 470), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (100, 255, 0), 1)
+            
             ret, buffer = cv2.imencode('.jpg', blank, [cv2.IMWRITE_JPEG_QUALITY, 70])
             frame_bytes = buffer.tobytes()
             yield (
@@ -625,7 +655,7 @@ def generate_frames():
                 + frame_bytes +
                 b'\r\n'
             )
-            time.sleep(0.1)
+            time.sleep(0.5)
         return
 
     # ===== ULTRA-AGGRESSIVE OPTIMIZATION PARAMETERS =====
