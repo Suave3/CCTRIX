@@ -170,7 +170,7 @@ def _open_camera(source):
                         pass
                     try:
                         if hasattr(cv2, 'CAP_PROP_OPEN_TIMEOUT_MSEC'):
-                            cam.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 5000)  # FAST 5s timeout
+                            cam.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 2000)  # FAST 2s timeout
                     except Exception:
                         pass
                     try:
@@ -187,8 +187,8 @@ def _open_camera(source):
                     except Exception:
                         pass
                 
-                # FAST connection test - reduced from 2s to 0.5s
-                time.sleep(0.5)
+                # FAST connection test - reduced to 0.2s
+                time.sleep(0.2)
                 
                 if cam.isOpened():
                     print(f"    {backend_name}: Connection established, testing frame read...")
@@ -222,15 +222,27 @@ def _open_camera(source):
 
 if CAMERA_SOURCE:
     print(f"Attempting camera source: {CAMERA_SOURCE}")
-    camera = _open_camera(CAMERA_SOURCE)
+    # Try camera in background to not block app startup
+    def _init_camera():
+        global camera
+        try:
+            camera = _open_camera(CAMERA_SOURCE)
+            
+            # Fallback to local device if RTSP or primary source fails
+            if camera is None and not CAMERA_SOURCE.isdigit():
+                print(f"⚠️  Primary source failed. Falling back to local device camera (device {FALLBACK_DEVICE})...")
+                camera = _open_camera(FALLBACK_DEVICE)
+            
+            if camera is None:
+                print("⚠️  CAMERA ERROR: Unable to open camera source - running in headless mode")
+        except Exception as e:
+            print(f"⚠️  Camera init error: {e}")
     
-    # Fallback to local device if RTSP or primary source fails
-    if camera is None and not CAMERA_SOURCE.isdigit():
-        print(f"⚠️  Primary source failed. Falling back to local device camera (device {FALLBACK_DEVICE})...")
-        camera = _open_camera(FALLBACK_DEVICE)
-    
-    if camera is None:
-        print("⚠️  CAMERA ERROR: Unable to open camera source - running in headless mode")
+    # Start camera init in background thread (non-blocking)
+    camera_init_thread = threading_module.Thread(target=_init_camera, daemon=True)
+    camera_init_thread.start()
+else:
+    print("⚠️  CAMERA_SOURCE not set - running in headless mode")
 
 previous_frame = None
 motion_active = False
