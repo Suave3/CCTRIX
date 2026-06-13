@@ -564,13 +564,16 @@ def generate_frames():
     if cv2 is None:
         print("⚠️  OpenCV not available - cannot generate video stream")
         while True:
-            blank = np.ones((500, 800, 3), dtype=np.uint8) * 255
-            from PIL import ImageDraw, ImageFont
-            img = Image.fromarray(blank)
-            draw = ImageDraw.Draw(img)
-            draw.text((150, 240), "Video unavailable in cloud mode", fill=(0, 0, 255))
-            frame_array = np.array(img)
-            ret, buffer = cv2.imencode('.jpg', frame_array) if cv2 else (False, None)
+            blank = np.ones((500, 800, 3), dtype=np.uint8) * 50
+            cv2_available = False
+            try:
+                import cv2 as cv2_test
+                cv2_available = True
+            except:
+                pass
+            if cv2_available:
+                cv2.putText(blank, "ERROR: OpenCV import failed", (50, 250), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+            ret, buffer = cv2.imencode('.jpg', blank, [cv2.IMWRITE_JPEG_QUALITY, 70]) if cv2 else (False, None)
             if ret and buffer is not None:
                 yield (
                     b'--frame\r\n'
@@ -578,22 +581,25 @@ def generate_frames():
                     + buffer.tobytes() +
                     b'\r\n'
                 )
+            else:
+                # Fallback: no cv2 available, just black frame
+                yield (
+                    b'--frame\r\n'
+                    b'Content-Type: image/jpeg\r\n\r\n'
+                    + b'\xFF\xD8\xFF\xE0\x00\x10JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00\xFF\xDB\x00C\x00\x03\x02\x02\x02\x02\x02\x03\x02\x02\x02\x03\x03\x03\x03\x04\x06\x04\x04\x04\x04\x04\x08\x06\x06\x05\x06\x09\x08\n\n\t\x08\t\t\n\x0c\x0f\x0c\n\x0b\x0e\x0b\n\n\n\x0c\x11\r\x0e\x0f\x10\x10\x11\x10\n\n\x11\x11\x12\x12\x12\x13\x0f\x13\x13\x13\x13\x13\x13\x13\x13\x13\x13\x13\x13\x13\x13\x13\x13\x13\x13\x13\x13\x13\x13\x13\x13\x13\x13\xFF\xC0\x00\x0B\x08\x00\x01\x00\x01\x01\x01\x11\x00\xFF\xC4\x00\x1F\x00\x00\x01\x05\x01\x01\x01\x01\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x01\x02\x03\x04\x05\x06\x07\x08\t\n\x0b\xFF\xC4\x00\xB5\x10\x00\x02\x01\x03\x03\x02\x04\x03\x05\x05\x04\x04\x00\x00\x01}\x01\x02\x03\x00\x04\x11\x05\x12!1A\x06\x13Qa\x07"q\x142\x81\x91\xa1\x08#B\xb1\xc1\x15R\xd1\xf0$3br\x82\t\n\x16\x17\x18\x19\x1a%&\'()*456789:CDEFGHIJSTUVWXYZcdefghijstuvwxyz\x83\x84\x85\x86\x87\x88\x89\x8a\x92\x93\x94\x95\x96\x97\x98\x99\x9a\xa2\xa3\xa4\xa5\xa6\xa7\xa8\xa9\xaa\xb2\xb3\xb4\xb5\xb6\xb7\xb8\xb9\xba\xc2\xc3\xc4\xc5\xc6\xc7\xc8\xc9\xca\xd2\xd3\xd4\xd5\xd6\xd7\xd8\xd9\xda\xe1\xe2\xe3\xe4\xe5\xe6\xe7\xe8\xe9\xea\xf1\xf2\xf3\xf4\xf5\xf6\xf7\xf8\xf9\xfa\xFF\xDA\x00\x08\x01\x01\x00\x00?\x00\xfb\xd5U\x00\x00\x00\x01\xFF\xD9' +
+                    b'\r\n'
+                )
             time.sleep(0.1)
         return
 
     # Railway mode - no camera
     if camera is None:
+        print("⚠️  HEADLESS MODE: No camera available (expected in Railway cloud)")
         while True:
-            blank = np.ones((500, 800, 3), dtype=np.uint8) * 255
-            cv2.putText(
-                blank,
-                "Railway Cloud Mode - No Camera",
-                (120, 250),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                1,
-                (0, 0, 255),
-                2
-            )
+            blank = np.ones((500, 800, 3), dtype=np.uint8) * 50
+            cv2.putText(blank, "Railway Cloud Mode", (120, 150), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 165, 255), 2)
+            cv2.putText(blank, "No Camera Connected", (80, 250), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+            cv2.putText(blank, "Logs are still recording", (70, 350), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 1)
             ret, buffer = cv2.imencode('.jpg', blank, [cv2.IMWRITE_JPEG_QUALITY, 70])
             frame_bytes = buffer.tobytes()
             yield (
