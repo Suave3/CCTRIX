@@ -142,7 +142,7 @@ def _open_camera(source):
         else:
             urls_to_try = [source]
         
-        # Try each URL
+        # Try each URL with FAST timeout
         for attempt_url in urls_to_try:
             if attempt_url != urls_to_try[0]:  # Not the primary URL
                 print(f"  Trying fallback path: {attempt_url.split('/')[-1] or '/'}")
@@ -170,7 +170,7 @@ def _open_camera(source):
                         pass
                     try:
                         if hasattr(cv2, 'CAP_PROP_OPEN_TIMEOUT_MSEC'):
-                            cam.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 30000)
+                            cam.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 5000)  # FAST 5s timeout
                     except Exception:
                         pass
                     try:
@@ -182,31 +182,22 @@ def _open_camera(source):
                         cam.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
                     except Exception:
                         pass
-                    # Drop frames if buffer is full (prevents lag)
                     try:
                         cam.set(cv2.CAP_PROP_AUTOFOCUS, 0)
                     except Exception:
                         pass
                 
-                # Wait for connection to establish
-                time.sleep(2)
+                # FAST connection test - reduced from 2s to 0.5s
+                time.sleep(0.5)
                 
                 if cam.isOpened():
                     print(f"    {backend_name}: Connection established, testing frame read...")
-                    # Try to read a frame to verify connection
-                    success = False
-                    for attempt in range(3):  # Try 3 times to read a frame
-                        ret, frame = cam.read()
-                        if ret and frame is not None and frame.size > 0:
-                            print(f"✓ RTSP camera connected successfully!")
-                            print(f"  URL: {attempt_url}")
-                            print(f"  Backend: {backend_name}")
-                            success = True
-                            break
-                        if attempt < 2:
-                            time.sleep(1)
-                    
-                    if success:
+                    # Try to read a frame to verify connection (only 1 attempt for speed)
+                    ret, frame = cam.read()
+                    if ret and frame is not None and frame.size > 0:
+                        print(f"✓ RTSP camera connected successfully!")
+                        print(f"  URL: {attempt_url}")
+                        print(f"  Backend: {backend_name}")
                         return cam
                     else:
                         cam.release()
@@ -214,11 +205,13 @@ def _open_camera(source):
                     cam.release()
 
         print(f"✗ All connection methods failed for RTSP: {source}")
-        print("   Possible causes:")
-        print("   - Camera is offline or not accessible")
-        print("   - RTSP credentials are incorrect")
-        print("   - Stream path is wrong")
-        print("   - Port 554 is blocked by firewall")
+        print("   Network-accessible cameras only work when:")
+        print("   1. Camera is publicly accessible (port forwarded)")
+        print("   2. You're in the same network as the camera")
+        print("   3. Railway can route to your network")
+        print("")
+        print("   TEST: To verify RTSP works, try setting:")
+        print("   CAMERA_SOURCE=rtsp://wowzaec2demo.streamlock.net/vod/mp4:BigBuckBunny_115k.mov")
         return None
         
     except Exception as e:
