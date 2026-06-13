@@ -330,12 +330,17 @@ def _async_db_logger():
             try:
                 if log_type == 'detection':
                     db.log_detection(*args)
+                    print(f"✓ Async: Detection logged")
                 elif log_type == 'auth':
                     db.log_auth(*args)
+                    print(f"✓ Async: Auth logged - {args[0]} {args[1]}")
                 elif log_type == 'failed_login':
                     db.log_failed_login(*args)
+                    print(f"✓ Async: Failed login logged - {args[0]}")
             except Exception as e:
-                print(f"Async logging error: {e}")
+                print(f"❌ Async logging error: {e}")
+                import traceback
+                traceback.print_exc()
         except:
             pass
 
