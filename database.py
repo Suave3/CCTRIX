@@ -370,15 +370,23 @@ def log_failed_login(username, ip_address, user_agent):
 
 def log_detection(person_detected, confidence, image_path):
     """Log person detection events"""
-    query = """
-        INSERT INTO detection_logs (person_detected, confidence, image_path)
-        VALUES (%s, %s, %s)
-    """
-    params = (person_detected, confidence, image_path)
-    result = execute_query(query, params)
-    if result:
-        logger.info(f"✅ Detection logged: person={person_detected}, confidence={confidence:.2f}")
-    return result
+    try:
+        query = """
+            INSERT INTO detection_logs (person_detected, confidence, image_path)
+            VALUES (%s, %s, %s)
+        """
+        params = (person_detected, confidence, image_path)
+        result = execute_query(query, params)
+        if result:
+            logger.info(f"✅ Detection logged: person={person_detected}, confidence={confidence:.2f}, image={image_path}")
+        else:
+            logger.error(f"❌ Detection insert failed: {params}")
+        return result
+    except Exception as e:
+        logger.error(f"❌ log_detection error: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
 
 def get_auth_logs(limit=100):
     """Retrieve authentication logs"""
@@ -455,13 +463,21 @@ def seed_users():
 
 def get_recent_detections(limit=20):
     """Get recent detection logs"""
-    query = """
-        SELECT person_detected, confidence, image_path, detected_at
-        FROM detection_logs
-        ORDER BY id DESC
-        LIMIT %s
-    """
-    return execute_query(query, (limit,), fetch=True)
+    try:
+        query = """
+            SELECT person_detected, confidence, image_path, detected_at
+            FROM detection_logs
+            ORDER BY id DESC
+            LIMIT %s
+        """
+        result = execute_query(query, (limit,), fetch=True)
+        logger.info(f"📊 Retrieved {len(result) if result else 0} recent detections from database")
+        return result
+    except Exception as e:
+        logger.error(f"❌ get_recent_detections error: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
 
 def count_detections_today():
     """Count detection logs from today"""

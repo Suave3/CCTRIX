@@ -319,29 +319,54 @@ def _camera_reader_thread():
 db_log_queue = Queue(maxsize=100)
 
 def _async_db_logger():
-    """Background threacd for database logging to avoid blocking video stream"""
+    """Background thread for database logging to avoid blocking video stream"""
+    print("🔵 Async DB Logger started - waiting for events...")
+    failed_count = 0
+    success_count = 0
+    
     while True:
         try:
             log_item = db_log_queue.get(timeout=1)
             if log_item is None:  # Shutdown signal
+                print(f"🔴 Async DB Logger shutting down (Success: {success_count}, Failed: {failed_count})")
                 break
             
             log_type, args = log_item
             try:
                 if log_type == 'detection':
-                    db.log_detection(*args)
-                    print(f"✓ Async: Detection logged")
+                    result = db.log_detection(*args)
+                    if result:
+                        success_count += 1
+                        print(f"✓ Async: Detection logged (Total: {success_count}) - Path: {args[2]}")
+                    else:
+                        failed_count += 1
+                        print(f"❌ Async: Detection logging failed - args: {args}")
+                        
                 elif log_type == 'auth':
-                    db.log_auth(*args)
-                    print(f"✓ Async: Auth logged - {args[0]} {args[1]}")
+                    result = db.log_auth(*args)
+                    if result:
+                        success_count += 1
+                        print(f"✓ Async: Auth logged - {args[0]} {args[1]} (Total: {success_count})")
+                    else:
+                        failed_count += 1
+                        print(f"❌ Async: Auth logging failed - {args[0]}")
+                        
                 elif log_type == 'failed_login':
-                    db.log_failed_login(*args)
-                    print(f"✓ Async: Failed login logged - {args[0]}")
+                    result = db.log_failed_login(*args)
+                    if result:
+                        success_count += 1
+                        print(f"✓ Async: Failed login logged - {args[0]} (Total: {success_count})")
+                    else:
+                        failed_count += 1
+                        print(f"❌ Async: Failed login logging failed - {args[0]}")
             except Exception as e:
+                failed_count += 1
                 print(f"❌ Async logging error: {e}")
+                print(f"   Log type: {log_type}, Args: {args}")
                 import traceback
                 traceback.print_exc()
         except:
+            # Queue timeout - this is normal, just wait for next item
             pass
 
 # Start async logger thread
@@ -622,6 +647,27 @@ def generate_frames():
         demo_event_counter = 0
         demo_last_event = time.time()
         demo_motion_active = False
+        demo_snapshot_path = None
+        
+        # Create a demo snapshot image once for reuse
+        try:
+            demo_snapshot_filename = "demo_snapshot.jpg"
+            demo_snapshot_path = f"/static/logs/{demo_snapshot_filename}"
+            demo_snapshot_file = os.path.join(LOGS_DIR, demo_snapshot_filename)
+            
+            # Only create demo snapshot if it doesn't exist
+            if not os.path.exists(demo_snapshot_file):
+                print(f"📸 Creating demo snapshot: {demo_snapshot_file}")
+                # Create a simple test image with "DEMO MODE" text
+                demo_img = np.ones((480, 640, 3), dtype=np.uint8) * 50
+                cv2.putText(demo_img, "RAILWAY DEMO MODE", (80, 240), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 165, 255), 2)
+                cv2.imwrite(demo_snapshot_file, demo_img, [cv2.IMWRITE_JPEG_QUALITY, 70])
+                print(f"✓ Demo snapshot created: {demo_snapshot_file}")
+            else:
+                print(f"✓ Demo snapshot already exists: {demo_snapshot_file}")
+        except Exception as e:
+            print(f"❌ Failed to create demo snapshot: {e}")
+            demo_snapshot_path = None
         
         while True:
             # Simulate motion events every 15-30 seconds for demo purposes
@@ -634,10 +680,16 @@ def generate_frames():
                     # Log a motion detection event (simulated)
                     try:
                         # Use proper log_detection signature: (person_detected, confidence, image_path)
-                        db_log_queue.put_nowait(('detection', (True, 0.95, 'demo_snapshot.jpg')))
-                        demo_event_counter += 1
+                        if demo_snapshot_path:
+                            db_log_queue.put_nowait(('detection', (True, 0.95, demo_snapshot_path)))
+                            demo_event_counter += 1
+                            print(f"✓ Demo event #{demo_event_counter} queued for database logging")
+                        else:
+                            print(f"⚠️  Demo event NOT logged - no snapshot available")
                     except Exception as e:
-                        print(f"Demo logging error: {e}")
+                        print(f"❌ Demo logging error: {e}")
+                        import traceback
+                        traceback.print_exc()
             
             # Display message with event count
             blank = np.ones((500, 800, 3), dtype=np.uint8) * 50
@@ -889,6 +941,9 @@ def logs():
     try:
         rows = db.get_recent_detections(20)
         motion_today = db.count_detections_today()
+        
+        # Debug: Log what we're retrieving
+        print(f"📊 /logs endpoint called - Retrieved {len(rows) if rows else 0} detections, {motion_today} today")
 
         return jsonify({
             "logs": [
@@ -901,15 +956,64 @@ def logs():
                 }
                 for r in (rows or [])
             ],
-            "motion_today": motion_today
+            "motion_today": motion_today,
+            "debug": {
+                "total_logs": len(rows) if rows else 0,
+                "database_connected": True
+            }
         })
 
     except Exception as e:
+        print(f"❌ /logs endpoint error: {e}")
+        import traceback
+        traceback.print_exc()
         return jsonify({
             "error": str(e),
             "logs": [],
-            "motion_today": 0
+            "motion_today": 0,
+            "debug": {
+                "database_connected": False
+            }
         })
+
+# =========================
+# DEBUG STATUS ENDPOINT
+# =========================
+@app.route('/api/status')
+def status():
+    """Get system status for debugging Railway vs Local"""
+    if not session.get('logged_in'):
+        return jsonify({"error": "unauthorized"}), 401
+    
+    try:
+        # Check camera status
+        camera_status = "Connected" if camera is not None else "Not connected (Headless/Railway mode)"
+        
+        # Check database
+        try:
+            test_rows = db.get_recent_detections(1)
+            db_status = "Connected"
+            db_logs_count = len(test_rows) if test_rows else 0
+        except Exception as e:
+            db_status = f"Error: {str(e)}"
+            db_logs_count = -1
+        
+        # Check queue size
+        queue_size = db_log_queue.qsize()
+        
+        return jsonify({
+            "status": "running",
+            "camera": camera_status,
+            "database": db_status,
+            "queue_size": queue_size,
+            "total_logs": db_logs_count,
+            "demo_mode": camera is None,
+            "logs_dir": LOGS_DIR,
+            "logs_dir_exists": os.path.exists(LOGS_DIR)
+        })
+    except Exception as e:
+        print(f"❌ /api/status error: {e}")
+        return jsonify({"error": str(e)}), 500
 
 # =========================
 # FAILED LOGIN PAGE
