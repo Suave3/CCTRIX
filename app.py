@@ -170,7 +170,7 @@ def _open_camera(source):
                         pass
                     try:
                         if hasattr(cv2, 'CAP_PROP_OPEN_TIMEOUT_MSEC'):
-                            cam.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 2000)  # FAST 2s timeout
+                            cam.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 10000)  # 10s timeout for RTSP
                     except Exception:
                         pass
                     try:
@@ -187,21 +187,29 @@ def _open_camera(source):
                     except Exception:
                         pass
                 
-                # FAST connection test - reduced to 0.2s
-                time.sleep(0.2)
+                # Give RTSP stream time to stabilize (2-3 seconds)
+                print(f"    {backend_name}: Testing stream connection...")
+                time.sleep(3)
                 
                 if cam.isOpened():
-                    print(f"    {backend_name}: Connection established, testing frame read...")
-                    # Try to read a frame to verify connection (only 1 attempt for speed)
-                    ret, frame = cam.read()
-                    if ret and frame is not None and frame.size > 0:
-                        print(f"✓ RTSP camera connected successfully!")
-                        print(f"  URL: {attempt_url}")
-                        print(f"  Backend: {backend_name}")
-                        return cam
-                    else:
+                    print(f"    {backend_name}: Attempting to read first frame...")
+                    # Try to read a frame to verify connection (with 5 attempts)
+                    frame_success = False
+                    for attempt in range(5):
+                        ret, frame = cam.read()
+                        if ret and frame is not None and frame.size > 0:
+                            frame_success = True
+                            print(f"✓ RTSP camera connected successfully!")
+                            print(f"  URL: {attempt_url}")
+                            print(f"  Backend: {backend_name}")
+                            return cam
+                        time.sleep(0.5)
+                    
+                    if not frame_success:
+                        print(f"    {backend_name}: Stream opened but can't read frames (trying next backend)")
                         cam.release()
                 else:
+                    print(f"    {backend_name}: Failed to open stream")
                     cam.release()
 
         print(f"✗ All connection methods failed for RTSP: {source}")
@@ -224,7 +232,7 @@ if CAMERA_SOURCE:
     print(f"Attempting camera source: {CAMERA_SOURCE}")
     # Try camera in background to not block app startup
     def _init_camera():
-        global camera
+        global camera, camera_thread_stop, camera_reading_thread
         try:
             camera = _open_camera(CAMERA_SOURCE)
             
@@ -235,6 +243,12 @@ if CAMERA_SOURCE:
             
             if camera is None:
                 print("⚠️  CAMERA ERROR: Unable to open camera source - running in headless mode")
+            else:
+                # START READER THREAD ONLY AFTER CAMERA IS READY
+                camera_thread_stop = False
+                camera_reading_thread = threading_module.Thread(target=_camera_reader_thread, daemon=True)
+                camera_reading_thread.start()
+                print("✓ Frame reader thread started")
         except Exception as e:
             print(f"⚠️  Camera init error: {e}")
     
@@ -294,12 +308,10 @@ def _camera_reader_thread():
     
     print("📹 Camera reader thread stopped")
 
+
 # Start camera reader thread if camera is available
-if camera is not None:
-    camera_thread_stop = False
-    camera_reading_thread = threading_module.Thread(target=_camera_reader_thread, daemon=True)
-    camera_reading_thread.start()
-    print("✓ Frame reader thread started")
+# NOTE: This is now started inside _init_camera() after successful connection
+
 
 # =========================
 # ASYNC DATABASE LOGGING
