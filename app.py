@@ -628,9 +628,8 @@ def generate_frames():
                 if demo_motion_active:
                     # Log a motion detection event (simulated)
                     try:
-                        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                        print(f"🎬 DEMO: Simulated motion detected at {timestamp}")
-                        db_log_queue.put_nowait(('detection', ('DEMO', timestamp, 'test_snapshot.jpg', 1)))
+                        # Use proper log_detection signature: (person_detected, confidence, image_path)
+                        db_log_queue.put_nowait(('detection', (True, 0.95, 'demo_snapshot.jpg')))
                         demo_event_counter += 1
                     except Exception as e:
                         print(f"Demo logging error: {e}")
