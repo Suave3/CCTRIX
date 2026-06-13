@@ -977,14 +977,12 @@ def logs():
         })
 
 # =========================
-# DEBUG STATUS ENDPOINT
+# DEBUG STATUS ENDPOINT - ADMIN ONLY
 # =========================
 @app.route('/api/status')
+@require_admin
 def status():
-    """Get system status for debugging Railway vs Local"""
-    if not session.get('logged_in'):
-        return jsonify({"error": "unauthorized"}), 401
-    
+    """Get system status for debugging Railway vs Local (ADMIN ONLY)"""
     try:
         # Check camera status
         camera_status = "Connected" if camera is not None else "Not connected (Headless/Railway mode)"
@@ -1154,11 +1152,12 @@ def health():
     return jsonify({"status": "ok"})
 
 # =========================
-# DEBUG: Check failed login attempts (in-memory)
+# DEBUG: Check failed login attempts (in-memory) - ADMIN ONLY
 # =========================
 @app.route('/debug/failed-logins/<ip_addr>')
+@require_admin
 def debug_failed_logins(ip_addr):
-    """Debug endpoint to check failed login count for an IP"""
+    """Debug endpoint to check failed login count for an IP (ADMIN ONLY)"""
     try:
         count = get_failed_attempt_count(ip_addr)
         attempts = FAILED_ATTEMPTS.get(ip_addr, [])
@@ -1180,31 +1179,40 @@ def debug_failed_logins(ip_addr):
         return jsonify({"error": str(e), "ip": ip_addr})
 
 @app.route('/debug/clear-attempts/<ip_addr>')
+@require_admin
 def debug_clear_attempts(ip_addr):
-    """DEBUG ONLY: Clear all failed attempts for an IP (for testing)"""
-    if ip_addr in FAILED_ATTEMPTS:
-        del FAILED_ATTEMPTS[ip_addr]
-    return jsonify({"message": f"Cleared all attempts for {ip_addr}"})
+    """DEBUG ONLY: Clear all failed attempts for an IP (ADMIN ONLY)"""
+    try:
+        if ip_addr in FAILED_ATTEMPTS:
+            del FAILED_ATTEMPTS[ip_addr]
+            print(f"🔧 ADMIN ACTION: Cleared failed attempts for IP {ip_addr}")
+        return jsonify({"message": f"Cleared all attempts for {ip_addr}", "status": "success"})
+    except Exception as e:
+        return jsonify({"error": str(e)})
 
 @app.route('/debug/all-attempts')
+@require_admin
 def debug_all_attempts():
-    """DEBUG ONLY: Show all tracked IPs and their attempt counts"""
-    return jsonify({
-        "tracked_ips": {
-            ip: {
-                "count": len(attempts),
-                "blocked": len(attempts) >= 5,
-                "attempts": [
-                    {
-                        "username": u,
-                        "time": datetime.fromtimestamp(t).strftime("%Y-%m-%d %H:%M:%S")
-                    }
-                    for t, u in attempts
-                ]
+    """DEBUG ONLY: Show all tracked IPs and their attempt counts (ADMIN ONLY)"""
+    try:
+        return jsonify({
+            "tracked_ips": {
+                ip: {
+                    "count": len(attempts),
+                    "blocked": len(attempts) >= 5,
+                    "attempts": [
+                        {
+                            "username": u,
+                            "time": datetime.fromtimestamp(t).strftime("%Y-%m-%d %H:%M:%S")
+                        }
+                        for t, u in attempts
+                    ]
+                }
+                for ip, attempts in FAILED_ATTEMPTS.items()
             }
-            for ip, attempts in FAILED_ATTEMPTS.items()
-        }
-    })
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)})
 
 
 # =========================
@@ -1212,7 +1220,25 @@ def debug_all_attempts():
 # =========================
 if __name__ == '__main__':
 
-    port = int(os.environ.get("PORT", 5000))
+    port_env = os.environ.get("PORT")
+    
+    # Check if running locally (not on Railway)
+    if port_env is None or port_env == "5000":
+        print("\n" + "="*70)
+        print("❌ RAILWAY-ONLY APPLICATION")
+        print("="*70)
+        print("\nThis application is configured to run ONLY on Railway.")
+        print("\nTo deploy:")
+        print("  1. Push to GitHub: git push origin main")
+        print("  2. Railway will auto-deploy")
+        print("  3. Access via Railway dashboard URL")
+        print("\nLocal testing is disabled.")
+        print("="*70 + "\n")
+        exit(1)
+    
+    # If we get here, we're on Railway
+    port = int(port_env)
+    print(f"\n✅ Railway environment detected. Port: {port}")
 
     app.run(
         host='0.0.0.0',
